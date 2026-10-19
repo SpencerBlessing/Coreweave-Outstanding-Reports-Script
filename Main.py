@@ -1,13 +1,13 @@
 import traceback
 
 try:
-    from GUI import CoreWeaveTool
+    from Reports.MainMenu import MainMenu
 
-    print("GUI imported successfully.")
+    print("Main menu imported successfully.")
 
-    app = CoreWeaveTool()
+    app = MainMenu()
 
-    print("Application created successfully.")
+    print("Main menu created successfully.")
 
     app.mainloop()
 

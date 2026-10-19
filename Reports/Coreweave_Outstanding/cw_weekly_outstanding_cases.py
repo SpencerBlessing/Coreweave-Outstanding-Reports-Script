@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import argparse
 
 # --------------------------------------------------------
 # Paths
@@ -21,6 +22,13 @@ CASE_FILE = REPORT_FOLDER / "case_input.xlsx"
 FAULTY_PART_FILE = REPORT_FOLDER / "faulty_part_input.xlsx"
 OUTPUT_FILE = REPORT_FOLDER / "outstanding_case_output.xlsx"
 
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--since",
+    help="Only include cases created on or after YYYY-MM-DD"
+)
+args = parser.parse_args()
 
 # --------------------------------------------------------
 # Salesforce Excel reader
@@ -233,6 +241,29 @@ case_df = pd.merge(
     on="Case Number"
 )
 
+
+# --------------------------------------------------------
+# Optional date filter
+# --------------------------------------------------------
+
+if args.since:
+    if "Case Creation Date" not in case_df.columns:
+        raise ValueError("Could not find 'Case Creation Date' column.")
+
+    case_df["Case Creation Date"] = pd.to_datetime(
+        case_df["Case Creation Date"],
+        errors="coerce"
+    )
+
+    start_date = pd.to_datetime(args.since)
+
+    case_df = case_df[
+        case_df["Case Creation Date"] >= start_date
+    ].copy()
+
+    print(f"Filtering cases created on or after {start_date.date()}")
+
+print(f"Cases remaining: {len(case_df)}")
 
 # --------------------------------------------------------
 # Faulty part processing

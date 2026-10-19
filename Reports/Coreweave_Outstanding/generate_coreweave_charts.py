@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime
 
+
 PALETTE = [
     "#0072B2",  # Blue
     "#E69F00",  # Orange
@@ -252,14 +253,21 @@ def part_number_chart(main_df, output_path):
 
 def age_by_status_chart(main_df, output_path):
     age_order = [
-        "Open ≤ 9 days",
-        "Open 10–15 days",
-        "Open 16–30 days",
-        "Open > 30 days",
+        "A · Open ≤ 9 days",
+        "B · Open 10–15 days",
+        "C · Open 16–30 days",
+        "D · Open > 30 days",
     ]
 
-    chart_data = pd.crosstab(main_df["Case Age"], main_df["Status"])
-    chart_data = chart_data.reindex(age_order).fillna(0)
+    chart_data = pd.crosstab(
+        main_df["Case Age"],
+        main_df["Status"]
+    )
+
+    chart_data = chart_data.reindex(
+        age_order,
+        fill_value=0
+    )
 
     colors = [
         PALETTE[i % len(PALETTE)]
@@ -462,40 +470,59 @@ def get_two_latest_reports(script_dir):
 
     return previous_report, current_report
 
-def main():
-    script_dir = Path(__file__).resolve().parent
 
-    reports_dir = script_dir / "Reports"
+def main():
+    # --------------------------------------------------------
+    # LOCATE INPUT WORKBOOK
+    # --------------------------------------------------------
 
     if len(sys.argv) > 1:
-        workbook = Path(sys.argv[1])
-        if not workbook.is_absolute():
-            workbook = script_dir / workbook
+        workbook = Path(sys.argv[1]).resolve()
     else:
-        reports_dir = script_dir / "Reports"
+        reports_dir = Path(__file__).resolve().parent / "Output"
+
         workbooks = list(
             reports_dir.glob("CoreWeave Outstanding Cases *.xlsx")
         )
 
         if not workbooks:
             raise FileNotFoundError(
-                f"No matching Excel workbooks found in {reports_dir}"
+                f"No finalized reports found in {reports_dir}"
             )
 
-        workbook = max(workbooks, key=lambda p: p.stat().st_mtime)
-        
-    if not workbook.exists():
-        raise FileNotFoundError(
-            f"Could not find workbook: {workbook}\n"
-            "Put the Excel file beside this script or pass its full path as an argument."
+        workbook = max(
+            workbooks,
+            key=lambda p: p.stat().st_mtime
         )
 
+    if not workbook.exists():
+        raise FileNotFoundError(
+            f"Report not found: {workbook}"
+        )
+
+    # --------------------------------------------------------
+    # SET CHART OUTPUT FOLDER
+    # --------------------------------------------------------
+
     output_dir = workbook.parent / "Charts"
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    main_df = pd.read_excel(workbook, sheet_name="CoreWeave Outstanding Cases")
+    print(f"Reading report: {workbook}")
+    print(f"Saving charts to: {output_dir}")
 
-    # Age chart
+    # --------------------------------------------------------
+    # LOAD OUTSTANDING CASES
+    # --------------------------------------------------------
+
+    main_df = pd.read_excel(
+        workbook,
+        sheet_name="CoreWeave Outstanding Cases"
+    )
+
+    # --------------------------------------------------------
+    # CASE AGE CHART
+    # --------------------------------------------------------
+
     age_order = [
         "A · Open ≤ 9 days",
         "B · Open 10–15 days",
@@ -503,7 +530,12 @@ def main():
         "D · Open > 30 days",
     ]
 
-    age_counts = main_df["Case Age"].value_counts().reindex(age_order).dropna()
+    age_counts = (
+        main_df["Case Age"]
+        .value_counts()
+        .reindex(age_order)
+        .dropna()
+    )
 
     pie_chart(
         age_counts,
@@ -511,7 +543,10 @@ def main():
         output_dir / "cases_by_age.png"
     )
 
-    # Status chart
+    # --------------------------------------------------------
+    # STATUS CHART
+    # --------------------------------------------------------
+
     save_bar(
         main_df["Status"].value_counts(),
         "Outstanding Cases by Status",
@@ -522,14 +557,24 @@ def main():
         limit=12
     )
 
-    age_status_pies(main_df, output_dir)
+    # --------------------------------------------------------
+    # STATUS BY AGE
+    # --------------------------------------------------------
+
+    age_status_pies(
+        main_df,
+        output_dir
+    )
 
     age_by_status_chart(
         main_df,
         output_dir / "cases_by_age_and_status.png"
     )
 
-    # Region chart
+    # --------------------------------------------------------
+    # REGION CHART
+    # --------------------------------------------------------
+
     region_counts = main_df["Region"].value_counts()
 
     pie_chart(
@@ -538,18 +583,25 @@ def main():
         output_dir / "cases_by_region_pie.png"
     )
 
+    # --------------------------------------------------------
+    # FAULTY PART NUMBER CHART
+    # --------------------------------------------------------
 
-    # Faulty part number chart
     part_number_chart(
         main_df,
         output_dir / "cases_by_part_number.png"
     )
 
-    #  Cases over time chard
+    # --------------------------------------------------------
+    # CASES OVER TIME CHART
+    # --------------------------------------------------------
+
     open_cases_over_time_chart(
-    main_df,
-    output_dir / "open_cases_over_time.png"
-)
+        main_df,
+        output_dir / "open_cases_over_time.png"
+    )
+
+    print("Chart generation completed successfully.")
 
 if __name__ == "__main__":
     main()

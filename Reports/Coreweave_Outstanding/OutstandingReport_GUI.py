@@ -1,3 +1,5 @@
+import sys
+import subprocess
 from pathlib import Path
 from datetime import datetime
 import os
@@ -5,11 +7,15 @@ import shutil
 import threading
 import webbrowser
 
+# Project root: Coreweave Outstanding Reports/
+BASE_DIR = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(BASE_DIR))
+
+from Utilities.AddressValidator import AddressValidator
+
+from openpyxl import load_workbook
 import customtkinter as ctk
 import pandas as pd
-
-from AddressValidator import AddressValidator
-
 
 # ============================================================
 # CONFIGURATION
@@ -18,21 +24,39 @@ from AddressValidator import AddressValidator
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
 
-BASE_DIR = Path(__file__).resolve().parent
+# Report-specific folder
+OUTSTANDING_FOLDER = BASE_DIR / "Reports" / "Coreweave_Outstanding"
 
-REPORT_FOLDER = BASE_DIR / "Reports"
+# Input reports downloaded from Salesforce
+REPORT_FOLDER = OUTSTANDING_FOLDER / "Input"
+
+# Shared address cache stays at project root
 ADDRESS_CACHE_FOLDER = BASE_DIR / "Address Cache"
-DOWNLOADS_FOLDER = Path.home() / "Downloads"
-
-REPORT_FOLDER.mkdir(exist_ok=True)
-ADDRESS_CACHE_FOLDER.mkdir(exist_ok=True)
-
 ADDRESS_FILE = ADDRESS_CACHE_FOLDER / "address_input.xlsx"
 
+# Salesforce input reports
 NEW_ADDRESS_FILE = REPORT_FOLDER / "new_address.xlsx"
 CASE_FILE = REPORT_FOLDER / "case_input.xlsx"
 FAULTY_PART_FILE = REPORT_FOLDER / "faulty_part_input.xlsx"
-OUTPUT_FILE = REPORT_FOLDER / "outstanding_case_output.xlsx"
+
+# Generated reports
+OUTPUT_FOLDER = OUTSTANDING_FOLDER / "Output"
+OUTPUT_FILE = OUTPUT_FOLDER / "outstanding_case_output.xlsx"
+
+# Charts
+CHARTS_SCRIPT = OUTSTANDING_FOLDER / "generate_coreweave_charts.py"
+CHARTS_FOLDER = OUTPUT_FOLDER / "Charts"
+
+# Dashboard
+DASHBOARD_SCRIPT = OUTSTANDING_FOLDER / "generate_coreweave_dashboard.py"
+
+# Ensure folders exist
+REPORT_FOLDER.mkdir(parents=True, exist_ok=True)
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+CHARTS_FOLDER.mkdir(parents=True, exist_ok=True)
+ADDRESS_CACHE_FOLDER.mkdir(parents=True, exist_ok=True)
+
+DOWNLOADS_FOLDER = Path.home() / "Downloads"
 
 REPORT_URLS = [
     "https://supermicrocomputer.lightning.force.com/lightning/r/Report/00OPm00000KI2sfMAD/view?queryScope=userFolders",
@@ -262,6 +286,29 @@ class CoreWeaveTool(ctk.CTk):
             command=self.generate_report
         )
 
+        self.since_label = ctk.CTkLabel(
+        self.step3_frame,
+        text="Optional start date (YYYY-MM-DD):"
+       )
+
+        self.since_label.pack(
+            anchor="w",
+            padx=20,
+            pady=(0, 5)
+        )
+
+        self.since_entry = ctk.CTkEntry(
+            self.step3_frame,
+            placeholder_text="e.g. 2026-10-04",
+            width=200
+        )
+
+        self.since_entry.pack(
+            anchor="w",
+            padx=20,
+            pady=(0, 10)
+        )
+
         self.generate_button.pack(
             anchor="w",
             padx=20,
@@ -348,6 +395,29 @@ class CoreWeaveTool(ctk.CTk):
         )
 
         # ----------------------------------------------------
+        # STEP 6
+        # ----------------------------------------------------
+
+        self.step6_frame = self.create_step(
+            5,
+            "6. Generate Charts & Dashboard",
+            "Generate charts and build the dashboard from the latest finalized report."
+        )
+
+        self.generate_all_button = ctk.CTkButton(
+            self.step6_frame,
+            text="Generate Charts & Dashboard",
+            command=self.generate_charts_and_dashboard
+        )
+
+        self.generate_all_button.pack(
+            anchor="w",
+            padx=20,
+            pady=(0, 15)
+        )
+
+
+        # ----------------------------------------------------
         # REPORT FOLDER
         # ----------------------------------------------------
 
@@ -356,7 +426,7 @@ class CoreWeaveTool(ctk.CTk):
         )
 
         folder_frame.grid(
-            row=5,
+            row=6,
             column=0,
             padx=5,
             pady=(15, 5),
@@ -453,7 +523,7 @@ class CoreWeaveTool(ctk.CTk):
 
         status_label = ctk.CTkLabel(
             frame,
-            text="Checking...",
+            text="Not started",
             anchor="w"
         )
 
@@ -607,7 +677,7 @@ class CoreWeaveTool(ctk.CTk):
         # ----------------------------------------------------
 
         final_files = list(
-            REPORT_FOLDER.glob(
+            OUTPUT_FOLDER.glob(
                 "CoreWeave Outstanding Cases *.xlsx"
             )
         )
@@ -690,75 +760,48 @@ class CoreWeaveTool(ctk.CTk):
     # ========================================================
 
     def organize_reports(self):
-
         try:
+            REPORT_FOLDER.mkdir(parents=True, exist_ok=True)
 
             found = []
 
-            for file in DOWNLOADS_FOLDER.glob(
-                "*.xlsx"
-            ):
+            print(f"Searching Downloads: {DOWNLOADS_FOLDER}")
+            print(f"Output folder: {REPORT_FOLDER}")
 
-                try:
+            for file in DOWNLOADS_FOLDER.glob("*.xlsx"):
+                filename = file.stem.lower()
+                print(f"Checking: {file.name}")
 
-                    df = pd.read_excel(
-                        file,
-                        header=None,
-                        nrows=10
-                    )
+                for report_name, destination_name in REPORT_TYPES.items():
+                    if report_name.lower() in filename:
+                        destination = REPORT_FOLDER / destination_name
 
-                    text = " ".join(
-                        df.astype(str)
-                        .fillna("")
-                        .values
-                        .flatten()
-                    )
-
-                except Exception:
-
-                    continue
-
-                for (
-                    report_name,
-                    destination_name
-                ) in REPORT_TYPES.items():
-
-                    if report_name.lower() in text.lower():
-
-                        destination = (
-                            REPORT_FOLDER
-                            / destination_name
-                        )
-
-                        shutil.copy2(
-                            file,
-                            destination
-                        )
+                        shutil.copy2(file, destination)
 
                         found.append(
-                            f"{report_name} → "
-                            f"{destination_name}"
+                            f"{file.name} -> {destination_name}"
                         )
-
+                        print(f"Copied to: {destination}")
                         break
 
             if not found:
-
                 self.set_status(
-                    "No matching Salesforce reports "
-                    "found in Downloads."
+                    "No matching reports found. Check the console."
                 )
-
+                print("No matching Salesforce reports found.")
                 return
 
             self.set_status(
-                f"Organized {len(found)} "
-                "Salesforce report(s)."
+                f"Organized {len(found)} Salesforce report(s)."
             )
-
             self.update_workflow_status()
 
+            for item in found:
+                print(item)
+
         except Exception as e:
+            print(f"Error organizing reports: {e}")
+            self.set_status(f"Error organizing reports: {e}")
 
             self.set_status(
                 f"Error organizing reports: {e}"
@@ -850,6 +893,15 @@ class CoreWeaveTool(ctk.CTk):
 
             return
 
+        since_date = self.since_entry.get().strip() or None
+
+        if since_date:
+            try:
+                datetime.strptime(since_date, "%Y-%m-%d")
+            except ValueError:
+                self.set_status("Invalid date. Use YYYY-MM-DD.")
+                return
+    
         self.generate_button.configure(
             state="disabled",
             text="Generating..."
@@ -861,37 +913,25 @@ class CoreWeaveTool(ctk.CTk):
 
         thread = threading.Thread(
             target=self.generate_report_worker,
+            args=(since_date,),
             daemon=True
         )
-
         thread.start()
 
-    def generate_report_worker(self):
-
+    def generate_report_worker(self, since_date=None):
         try:
+            self.run_coreweave_report(since=since_date)
 
-            self.run_coreweave_report()
-
-            self.after(
-                0,
-                self.report_generation_success
-            )
+            self.after(0, self.report_generation_success)
 
         except Exception as e:
-
             error_message = str(e)
-
-            print(
-                f"REPORT GENERATION ERROR: "
-                f"{error_message}"
-            )
+            print(f"REPORT GENERATION ERROR: {error_message}")
 
             self.after(
                 0,
                 lambda message=error_message:
-                    self.report_generation_error(
-                        message
-                    )
+                    self.report_generation_error(message)
             )
 
     def report_generation_success(self):
@@ -931,7 +971,7 @@ class CoreWeaveTool(ctk.CTk):
     # COREWEAVE REPORT PROCESSING
     # ========================================================
 
-    def run_coreweave_report(self):
+    def run_coreweave_report(self, since=None):
 
         # ====================================================
         # ADDRESS PROCESSING
@@ -1115,6 +1155,45 @@ class CoreWeaveTool(ctk.CTk):
             how="left",
             on="Case Number"
         )
+
+        
+                # ====================================================
+        # OPTIONAL CASE CREATION DATE FILTER
+        # ====================================================
+
+        if since:
+            if "Case Creation Date" not in case_df.columns:
+                raise ValueError(
+                    "Could not find 'Case Creation Date' column."
+                )
+
+            # Convert the column from strings to datetime
+            case_df["Case Creation Date"] = pd.to_datetime(
+                case_df["Case Creation Date"],
+                errors="coerce"
+            )
+
+            # Count missing or invalid dates
+            invalid_date_count = (
+                case_df["Case Creation Date"].isna().sum()
+            )
+
+            start_date = pd.Timestamp(since)
+
+            # Keep cases created on or after the start date
+            case_df = case_df[
+                case_df["Case Creation Date"].notna()
+                & (case_df["Case Creation Date"] >= start_date)
+            ].copy()
+
+            self.set_worker_status(
+                f"Filtering from {start_date.date()}. "
+                f"Excluded {invalid_date_count} cases "
+                f"with missing/invalid dates."
+            )
+
+        print(f"Cases remaining: {len(case_df)}")
+
 
         # ====================================================
         # FAULTY PART PROCESSING
@@ -1582,6 +1661,17 @@ class CoreWeaveTool(ctk.CTk):
 
                 return
 
+            since_date = self.since_entry.get().strip() or None
+
+            if since_date:
+                try:
+                    datetime.strptime(since_date, "%Y-%m-%d")
+                except ValueError:
+                    self.set_status(
+                        "Invalid date. Use YYYY-MM-DD."
+                    )
+                    return
+
             # ------------------------------------------------
             # START FINALIZATION
             # ------------------------------------------------
@@ -1600,8 +1690,10 @@ class CoreWeaveTool(ctk.CTk):
                 "Regenerating final report..."
             )
 
+
             thread = threading.Thread(
                 target=self.finalize_report_worker,
+                args=(since_date,),
                 daemon=True
             )
 
@@ -1617,7 +1709,7 @@ class CoreWeaveTool(ctk.CTk):
     # FINALIZE WORKER
     # ========================================================
 
-    def finalize_report_worker(self):
+    def finalize_report_worker(self, since_date=None):
 
         try:
 
@@ -1625,7 +1717,7 @@ class CoreWeaveTool(ctk.CTk):
             # REGENERATE FINAL REPORT
             # ------------------------------------------------
 
-            self.run_coreweave_report()
+            self.run_coreweave_report(since=since_date)
 
             # ------------------------------------------------
             # VALIDATE AGAIN AFTER REGENERATION
@@ -1671,7 +1763,7 @@ class CoreWeaveTool(ctk.CTk):
             )
 
             final_file = (
-                REPORT_FOLDER
+                OUTPUT_FOLDER
                 / (
                     "CoreWeave Outstanding Cases "
                     f"{timestamp}.xlsx"
@@ -1803,13 +1895,33 @@ class CoreWeaveTool(ctk.CTk):
         # ----------------------------------------------------
         # COPY FINAL REPORT
         # ----------------------------------------------------
-
         try:
 
+            # Copy the working report to the final filename
             shutil.copy2(
                 OUTPUT_FILE,
                 final_file
             )
+
+            # Remove Unnamed columns while preserving worksheets
+            wb = load_workbook(final_file)
+
+            try:
+                for ws in wb.worksheets:
+                    for col in range(ws.max_column, 0, -1):
+                        header = ws.cell(row=1, column=col).value
+
+                        if (
+                            header is not None
+                            and str(header).startswith("Unnamed:")
+                        ):
+                            ws.delete_cols(col)
+
+                wb.save(final_file)
+
+            finally:
+                wb.close()
+
 
             self.generate_button.configure(
                 state="normal"
@@ -1821,14 +1933,12 @@ class CoreWeaveTool(ctk.CTk):
             )
 
             self.set_status(
-                f"Final report created: "
-                f"{final_file.name}"
+                f"Final report created: {final_file.name}"
             )
 
             self.update_workflow_status()
 
         except Exception as e:
-
             self.generate_button.configure(
                 state="normal"
             )
@@ -1866,87 +1976,245 @@ class CoreWeaveTool(ctk.CTk):
             f"Error finalizing report: {error}"
         )
 
+        
+
+    # ========================================================
+    # CHARTS & DASHBOARD
+    # ========================================================
+
+    def generate_charts_and_dashboard(self):
+        """Generate charts first, then generate the dashboard."""
+
+        if not CHARTS_SCRIPT.exists():
+            self.set_status(
+                f"Chart script not found: {CHARTS_SCRIPT}"
+            )
+            return
+
+        if not DASHBOARD_SCRIPT.exists():
+            self.set_status(
+                f"Dashboard script not found: {DASHBOARD_SCRIPT}"
+            )
+            return
+
+        reports = list(
+            OUTPUT_FOLDER.glob(
+                "CoreWeave Outstanding Cases *.xlsx"
+            )
+        )
+
+        if not reports:
+            self.set_status(
+                "No finalized report found. Finalize the report first."
+            )
+            return
+
+        latest_report = max(
+            reports,
+            key=lambda p: p.stat().st_mtime
+        )
+
+        self.generate_all_button.configure(
+            state="disabled",
+            text="Generating Charts..."
+        )
+
+        self.step6_frame.status_label.configure(
+            text=f"Generating charts from {latest_report.name}..."
+        )
+
+        self.set_status("Generating charts and dashboard...")
+
+        threading.Thread(
+            target=self.generate_all_worker,
+            args=(latest_report,),
+            daemon=True
+        ).start()
+
+    def generate_all_worker(self, report_path):
+        """Generate charts, then dashboard if charts succeed."""
+
+        try:
+            # STEP 1: Generate charts
+            self.after(
+                0,
+                lambda: self.step6_frame.status_label.configure(
+                    text="Generating charts..."
+                )
+            )
+
+            charts_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHARTS_SCRIPT),
+                    str(report_path)
+                ],
+                cwd=str(BASE_DIR),
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if charts_result.stdout:
+                print(charts_result.stdout)
+
+            if charts_result.returncode != 0:
+                raise RuntimeError(
+                    "Chart generation failed:\n"
+                    + (
+                        charts_result.stderr
+                        or charts_result.stdout
+                        or f"Exit code: {charts_result.returncode}"
+                    )
+                )
+
+            # STEP 2: Generate dashboard
+            self.after(
+                0,
+                lambda: self.step6_frame.status_label.configure(
+                    text="Charts complete. Generating dashboard..."
+                )
+            )
+
+            dashboard_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(DASHBOARD_SCRIPT)
+                ],
+                cwd=str(BASE_DIR),
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if dashboard_result.stdout:
+                print(dashboard_result.stdout)
+
+            if dashboard_result.returncode != 0:
+                raise RuntimeError(
+                    "Dashboard generation failed:\n"
+                    + (
+                        dashboard_result.stderr
+                        or dashboard_result.stdout
+                        or f"Exit code: {dashboard_result.returncode}"
+                    )
+                )
+
+            self.after(
+                0,
+                lambda: self.charts_dashboard_finished(None)
+            )
+
+        except Exception as exc:
+            error_message = str(exc)
+            print(f"CHARTS / DASHBOARD ERROR:\n{error_message}")
+
+            self.after(
+                0,
+                lambda message=error_message:
+                    self.charts_dashboard_finished(message)
+            )
+
+    def charts_dashboard_finished(self, error):
+        self.generate_all_button.configure(
+            state="normal",
+            text="Generate Charts & Dashboard"
+        )
+
+        if error:
+            self.step6_frame.status_label.configure(
+                text=f"Generation failed: {error}"
+            )
+            self.set_status(
+                "Charts/dashboard generation failed. Check the terminal."
+            )
+        else:
+            self.step6_frame.status_label.configure(
+                text="✓ Charts and dashboard generated successfully"
+            )
+            self.set_status(
+                "Charts and dashboard generated successfully."
+            )
+
+
     # ========================================================
     # REPORTS FOLDER
     # ========================================================
 
     def open_reports_folder(self):
         try:
-            os.startfile(REPORT_FOLDER)
-            self.set_status(
-                "Opened Reports folder."
-            )
+            os.startfile(OUTPUT_FOLDER)
+            self.set_status("Opened Outstanding Reports Output folder.")
         except Exception as e:
-            self.set_status(
-                f"Error opening Reports folder: {e}"
-            )
-
+            self.set_status(f"Error opening Output folder: {e}")
 
     def clear_reports_folder(self):
+        """Clear all contents of the Outstanding Input and Output folders."""
 
-        # ----------------------------------------------------
-        # CONFIRM DELETION
-        # ----------------------------------------------------
         dialog = ctk.CTkInputDialog(
             text=(
-                "This will delete EVERYTHING inside the Reports folder.\n\n"
+                "This will permanently delete all files and subfolders inside:\n\n"
+                "Reports\\Coreweave_Outstanding\\Input\n"
+                "Reports\\Coreweave_Outstanding\\Output\n\n"
                 "The Address Cache will NOT be affected.\n\n"
                 "Type YES to continue:"
             ),
-            title="Clear Reports Folder"
+            title="Clear Outstanding Reports"
         )
 
         response = dialog.get_input()
 
-        if response is None:
-            self.set_status(
-                "Clear Reports cancelled."
-            )
+        if response is None or response.strip().upper() != "YES":
+            self.set_status("Clear Reports cancelled.")
             return
 
-        if response.strip().upper() != "YES":
-            self.set_status(
-                "Clear Reports cancelled."
-            )
-            return
-
-        # ----------------------------------------------------
-        # CLEAR REPORTS FOLDER
-        # ----------------------------------------------------
         try:
+            folders_to_clear = [REPORT_FOLDER, OUTPUT_FOLDER]
             deleted_count = 0
+            errors = []
 
-            for item in REPORT_FOLDER.iterdir():
-                if item.is_dir():
-                    shutil.rmtree(item)
-                else:
-                    item.unlink()
+            for folder in folders_to_clear:
+                folder.mkdir(parents=True, exist_ok=True)
 
-                deleted_count += 1
+                for item in list(folder.iterdir()):
+                    try:
+                        if item.is_dir() and not item.is_symlink():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
 
-            self.address_textbox.delete(
-                "1.0",
-                "end"
-            )
+                        deleted_count += 1
 
-            self.address_textbox.insert(
-                "end",
-                "Reports folder cleared.\n\n"
-                "Download fresh Salesforce reports, "
-                "then click 'Organize Reports'."
-            )
+                    except Exception as e:
+                        errors.append(f"{item}: {e}")
+
+            self.address_textbox.delete("1.0", "end")
+
+            if errors:
+                self.address_textbox.insert(
+                    "end",
+                    "Some files could not be deleted:\n\n"
+                    + "\n".join(errors)
+                )
+                self.set_status(
+                    f"Cleared {deleted_count} item(s), "
+                    f"but {len(errors)} item(s) failed. See details."
+                )
+            else:
+                self.address_textbox.insert(
+                    "end",
+                    "Input and Output folders cleared.\n\n"
+                    "The Address Cache was preserved."
+                )
+                self.set_status(
+                    f"Successfully deleted {deleted_count} file(s)/folder(s) "
+                    f"from Input and Output."
+                )
 
             self.update_workflow_status()
 
-            self.set_status(
-                f"Reports folder cleared. "
-                f"Removed {deleted_count} item(s)."
-            )
-
         except Exception as e:
-            self.set_status(
-                f"Error clearing Reports folder: {e}"
-            )
+            self.set_status(f"Error clearing report folders: {e}")
 
 # ============================================================
 # DIRECT RUN

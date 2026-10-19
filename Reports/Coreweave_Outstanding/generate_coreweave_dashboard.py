@@ -37,7 +37,7 @@ def main():
     project_dir = Path(__file__).resolve().parent
 
     possible_chart_dirs = [
-        project_dir / "Reports" / "Charts",
+        project_dir / "Output" / "Charts",
         project_dir / "Charts",
     ]
     charts_dir = next((p for p in possible_chart_dirs if p.is_dir()), None)
@@ -180,7 +180,7 @@ def main():
         print("Comparison skipped: need at least two dated source reports.")
 
 
-    output_dir = project_dir / "Reports"
+    output_dir = project_dir / "Output"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "CoreWeave Charts Dashboard.xlsx"
 

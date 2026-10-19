@@ -2,20 +2,18 @@ from pathlib import Path
 import shutil
 import pandas as pd
 
-
 # ============================================================
 # Source and destination folders
 # ============================================================
 
-downloads = Path(r"C:\Users\spencerb\Downloads")
+downloads = Path.home() / "Downloads"
 
 report_folder = Path(
     r"C:\Users\spencerb\OneDrive - Super Micro Computer, Inc"
-    r"\Documents\Code\Coreweave Outstanding Reports\Reports"
+    r"\Documents\Code\Coreweave Outstanding Reports\Report_Generator"
 )
 
 report_folder.mkdir(parents=True, exist_ok=True)
-
 
 # ============================================================
 # Salesforce report names
@@ -39,7 +37,6 @@ if not xlsx_files:
     input("Press Enter to close...")
     raise SystemExit
 
-
 # ============================================================
 # Match files to Salesforce reports
 # ============================================================
@@ -60,7 +57,6 @@ for file in xlsx_files:
             )
 
             break
-
 
 # ============================================================
 # Check that all three reports were found
@@ -87,13 +83,11 @@ if missing:
     input("\nPress Enter to close...")
     raise SystemExit
 
-
 # ============================================================
 # Move and normalize reports
 # ============================================================
 
 print("Moving Salesforce reports...\n")
-
 
 for identifier, (source, new_name) in found_reports.items():
 
@@ -112,7 +106,6 @@ for identifier, (source, new_name) in found_reports.items():
     print(f"Moved:")
     print(f"  {source.name}")
     print(f"  -> {new_name}")
-
 
     # ========================================================
     # Find the real Salesforce header row
