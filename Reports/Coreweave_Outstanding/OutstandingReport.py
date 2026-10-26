@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from openpyxl.utils import get_column_letter
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -270,8 +271,9 @@ def generate_report(since=None, status_callback=None, directory_file=None):
             ws.freeze_panes = 'A2'
             ws.sheet_view.showGridLines = False
 
-            for column in ws.columns:
-                letter = column[0].column_letter
+            for col_idx, column in enumerate(ws.columns, start=1):
+                letter = get_column_letter(col_idx)
+
                 max_length = max(
                     (len(str(cell.value)) for cell in column if cell.value is not None),
                     default=0

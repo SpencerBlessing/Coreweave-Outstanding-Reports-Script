@@ -1,5 +1,4 @@
 import sys
-import subprocess
 import os
 import shutil
 import threading
@@ -47,17 +46,10 @@ RMA_FILE = REPORT_FOLDER / "rma_input.xlsx"
 OUTPUT_FOLDER = OUTSTANDING_FOLDER / "Output"
 OUTPUT_FILE = OUTPUT_FOLDER / "outstanding_case_output.xlsx"
 
-# Charts
-CHARTS_SCRIPT = OUTSTANDING_FOLDER / "generate_coreweave_charts.py"
-CHARTS_FOLDER = OUTPUT_FOLDER / "Charts"
-
-# Dashboard
-DASHBOARD_SCRIPT = OUTSTANDING_FOLDER / "generate_coreweave_dashboard.py"
-
 # Ensure folders exist
 REPORT_FOLDER.mkdir(parents=True, exist_ok=True)
 OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
-CHARTS_FOLDER.mkdir(parents=True, exist_ok=True)
+
 ADDRESS_CACHE_FOLDER.mkdir(parents=True, exist_ok=True)
 
 DOWNLOADS_FOLDER = Path.home() / "Downloads"
@@ -407,29 +399,6 @@ class CoreWeaveTool(ctk.CTk):
         )
 
         # ----------------------------------------------------
-        # STEP 6
-        # ----------------------------------------------------
-
-        self.step6_frame = self.create_step(
-            5,
-            "6. Generate Charts & Dashboard",
-            "Generate charts and build the dashboard from the latest finalized report."
-        )
-
-        self.generate_all_button = ctk.CTkButton(
-            self.step6_frame,
-            text="Generate Charts & Dashboard",
-            command=self.generate_charts_and_dashboard
-        )
-
-        self.generate_all_button.pack(
-            anchor="w",
-            padx=20,
-            pady=(0, 15)
-        )
-
-
-        # ----------------------------------------------------
         # REPORT FOLDER
         # ----------------------------------------------------
 
@@ -438,7 +407,7 @@ class CoreWeaveTool(ctk.CTk):
         )
 
         folder_frame.grid(
-            row=6,
+            row=5,
             column=0,
             padx=5,
             pady=(15, 5),
@@ -1446,167 +1415,6 @@ class CoreWeaveTool(ctk.CTk):
         self.set_status(
             f"Error finalizing report: {error}"
         )
-
-        
-
-    # ========================================================
-    # CHARTS & DASHBOARD
-    # ========================================================
-
-    def generate_charts_and_dashboard(self):
-        """Generate charts first, then generate the dashboard."""
-
-        if not CHARTS_SCRIPT.exists():
-            self.set_status(
-                f"Chart script not found: {CHARTS_SCRIPT}"
-            )
-            return
-
-        if not DASHBOARD_SCRIPT.exists():
-            self.set_status(
-                f"Dashboard script not found: {DASHBOARD_SCRIPT}"
-            )
-            return
-
-        reports = list(
-            OUTPUT_FOLDER.glob(
-                "CoreWeave Outstanding Cases *.xlsx"
-            )
-        )
-
-        if not reports:
-            self.set_status(
-                "No finalized report found. Finalize the report first."
-            )
-            return
-
-        latest_report = max(
-            reports,
-            key=lambda p: p.stat().st_mtime
-        )
-
-        self.generate_all_button.configure(
-            state="disabled",
-            text="Generating Charts..."
-        )
-
-        self.step6_frame.status_label.configure(
-            text=f"Generating charts from {latest_report.name}..."
-        )
-
-        self.set_status("Generating charts and dashboard...")
-
-        threading.Thread(
-            target=self.generate_all_worker,
-            args=(latest_report,),
-            daemon=True
-        ).start()
-
-    def generate_all_worker(self, report_path):
-        """Generate charts, then dashboard if charts succeed."""
-
-        try:
-            # STEP 1: Generate charts
-            self.after(
-                0,
-                lambda: self.step6_frame.status_label.configure(
-                    text="Generating charts..."
-                )
-            )
-
-            charts_result = subprocess.run(
-                [
-                    sys.executable,
-                    str(CHARTS_SCRIPT),
-                    str(report_path)
-                ],
-                cwd=str(BASE_DIR),
-                capture_output=True,
-                text=True,
-                check=False
-            )
-
-            if charts_result.stdout:
-                print(charts_result.stdout)
-
-            if charts_result.returncode != 0:
-                raise RuntimeError(
-                    "Chart generation failed:\n"
-                    + (
-                        charts_result.stderr
-                        or charts_result.stdout
-                        or f"Exit code: {charts_result.returncode}"
-                    )
-                )
-
-            # STEP 2: Generate dashboard
-            self.after(
-                0,
-                lambda: self.step6_frame.status_label.configure(
-                    text="Charts complete. Generating dashboard..."
-                )
-            )
-
-            dashboard_result = subprocess.run(
-                [
-                    sys.executable,
-                    str(DASHBOARD_SCRIPT)
-                ],
-                cwd=str(BASE_DIR),
-                capture_output=True,
-                text=True,
-                check=False
-            )
-
-            if dashboard_result.stdout:
-                print(dashboard_result.stdout)
-
-            if dashboard_result.returncode != 0:
-                raise RuntimeError(
-                    "Dashboard generation failed:\n"
-                    + (
-                        dashboard_result.stderr
-                        or dashboard_result.stdout
-                        or f"Exit code: {dashboard_result.returncode}"
-                    )
-                )
-
-            self.after(
-                0,
-                lambda: self.charts_dashboard_finished(None)
-            )
-
-        except Exception as exc:
-            error_message = str(exc)
-            print(f"CHARTS / DASHBOARD ERROR:\n{error_message}")
-
-            self.after(
-                0,
-                lambda message=error_message:
-                    self.charts_dashboard_finished(message)
-            )
-
-    def charts_dashboard_finished(self, error):
-        self.generate_all_button.configure(
-            state="normal",
-            text="Generate Charts & Dashboard"
-        )
-
-        if error:
-            self.step6_frame.status_label.configure(
-                text=f"Generation failed: {error}"
-            )
-            self.set_status(
-                "Charts/dashboard generation failed. Check the terminal."
-            )
-        else:
-            self.step6_frame.status_label.configure(
-                text="✓ Charts and dashboard generated successfully"
-            )
-            self.set_status(
-                "Charts and dashboard generated successfully."
-            )
-
 
     # ========================================================
     # REPORTS FOLDER
