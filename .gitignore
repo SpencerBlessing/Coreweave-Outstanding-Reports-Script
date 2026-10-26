@@ -224,3 +224,9 @@ Accuracy Check/*.xlsx
 
 # Local VS Code settings
 .vscode/
+
+# Generated reports and Salesforce data
+Reports/**/Input/
+Reports/**/Output/
+Reports/**/History/
+Address Cache/

@@ -1,21 +1,24 @@
 import sys
 import subprocess
-from pathlib import Path
-from datetime import datetime
 import os
 import shutil
 import threading
 import webbrowser
+import customtkinter as ctk
+import pandas as pd
+
+from pathlib import Path
+from datetime import datetime
+from openpyxl import load_workbook
 
 # Project root: Coreweave Outstanding Reports/
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
 
+from Utilities.CaseNumberStandardizer import standardize_case_number
 from Utilities.AddressValidator import AddressValidator
-
-from openpyxl import load_workbook
-import customtkinter as ctk
-import pandas as pd
+from Utilities.AddressAutoCorrect import auto_correct_addresses
+from Reports.Coreweave_Outstanding.OutstandingReport import generate_report
 
 # ============================================================
 # CONFIGURATION
@@ -38,6 +41,7 @@ ADDRESS_FILE = ADDRESS_CACHE_FOLDER / "address_input.xlsx"
 NEW_ADDRESS_FILE = REPORT_FOLDER / "new_address.xlsx"
 CASE_FILE = REPORT_FOLDER / "case_input.xlsx"
 FAULTY_PART_FILE = REPORT_FOLDER / "faulty_part_input.xlsx"
+RMA_FILE = REPORT_FOLDER / "rma_input.xlsx"
 
 # Generated reports
 OUTPUT_FOLDER = OUTSTANDING_FOLDER / "Output"
@@ -62,6 +66,7 @@ REPORT_URLS = [
     "https://supermicrocomputer.lightning.force.com/lightning/r/Report/00OPm00000KI2sfMAD/view?queryScope=userFolders",
     "https://supermicrocomputer.lightning.force.com/lightning/r/Report/00OPm00000KI3APMA1/view?queryScope=userFolders",
     "https://supermicrocomputer.lightning.force.com/lightning/r/Report/00OPm00000KIDGDMA5/view?queryScope=userFolders",
+    "https://supermicrocomputer.lightning.force.com/lightning/r/Report/00OPm00000MgLg5MAF/view?queryScope=userFolders",
 ]
 
 
@@ -69,8 +74,8 @@ REPORT_TYPES = {
     "CoreWeave All Cases with Addresses": "new_address.xlsx",
     "CoreWeave All Outstanding Cases": "case_input.xlsx",
     "CoreWeave Outstanding Cases with RMA": "faulty_part_input.xlsx",
+    "All CoreWeave RMA": "rma_input.xlsx",
 }
-
 
 # ============================================================
 # MAIN APPLICATION
@@ -233,7 +238,7 @@ class CoreWeaveTool(ctk.CTk):
         self.step1_frame = self.create_step(
             0,
             "1. Open Salesforce Reports",
-            "Open the three required Salesforce reports in your browser."
+            "Open the Salesforce reports in your browser."
         )
 
         self.salesforce_button = ctk.CTkButton(
@@ -361,6 +366,13 @@ class CoreWeaveTool(ctk.CTk):
             side="left",
             padx=(0, 10)
         )
+
+        self.auto_correct_button = ctk.CTkButton(
+            address_buttons,
+            text="Auto-Correct Addresses",
+            command=self.auto_correct_address_file
+        )
+        self.auto_correct_button.pack(side="left", padx=(0, 10))
 
         self.open_address_button = ctk.CTkButton(
             address_buttons,
@@ -582,7 +594,8 @@ class CoreWeaveTool(ctk.CTk):
         required_files = [
             NEW_ADDRESS_FILE,
             CASE_FILE,
-            FAULTY_PART_FILE
+            FAULTY_PART_FILE,
+            RMA_FILE
         ]
 
         if all(
@@ -762,50 +775,44 @@ class CoreWeaveTool(ctk.CTk):
     def organize_reports(self):
         try:
             REPORT_FOLDER.mkdir(parents=True, exist_ok=True)
+            downloads = list(DOWNLOADS_FOLDER.glob("*.xlsx"))
+            copied = []
+            missing = []
 
-            found = []
+            for report_name, destination_name in REPORT_TYPES.items():
+                matches = [
+                    path for path in downloads
+                    if report_name.casefold() in path.stem.casefold()
+                ]
+                if not matches:
+                    missing.append(report_name)
+                    continue
 
-            print(f"Searching Downloads: {DOWNLOADS_FOLDER}")
-            print(f"Output folder: {REPORT_FOLDER}")
+                # Always use the most recently modified matching download.
+                source = max(matches, key=lambda path: path.stat().st_mtime)
+                destination = REPORT_FOLDER / destination_name
 
-            for file in DOWNLOADS_FOLDER.glob("*.xlsx"):
-                filename = file.stem.lower()
-                print(f"Checking: {file.name}")
+                # Validate the source before replacing a previous good export.
+                cleaned = self.read_salesforce_excel(source)
+                if "Case Number" not in cleaned.columns:
+                    raise ValueError(f"Missing Case Number in {source.name}")
+                cleaned.to_excel(destination, index=False)
+                copied.append(f"{source.name} -> {destination_name}")
 
-                for report_name, destination_name in REPORT_TYPES.items():
-                    if report_name.lower() in filename:
-                        destination = REPORT_FOLDER / destination_name
-
-                        shutil.copy2(file, destination)
-
-                        found.append(
-                            f"{file.name} -> {destination_name}"
-                        )
-                        print(f"Copied to: {destination}")
-                        break
-
-            if not found:
-                self.set_status(
-                    "No matching reports found. Check the console."
-                )
-                print("No matching Salesforce reports found.")
-                return
-
-            self.set_status(
-                f"Organized {len(found)} Salesforce report(s)."
-            )
-            self.update_workflow_status()
-
-            for item in found:
+            for item in copied:
                 print(item)
-
-        except Exception as e:
-            print(f"Error organizing reports: {e}")
-            self.set_status(f"Error organizing reports: {e}")
-
-            self.set_status(
-                f"Error organizing reports: {e}"
-            )
+            if missing:
+                print("Missing downloads: " + ", ".join(missing))
+                self.set_status(
+                    f"Organized {len(copied)}/{len(REPORT_TYPES)} reports. "
+                    f"Missing: {', '.join(missing)}"
+                )
+            else:
+                self.set_status(f"Organized all {len(REPORT_TYPES)} Salesforce reports.")
+            self.update_workflow_status()
+        except Exception as exc:
+            print(f"Error organizing reports: {exc}")
+            self.set_status(f"Error organizing reports: {exc}")
 
     # ========================================================
     # EXCEL READING
@@ -872,10 +879,10 @@ class CoreWeaveTool(ctk.CTk):
     def generate_report(self):
 
         required_files = [
-            ADDRESS_FILE,
             NEW_ADDRESS_FILE,
             CASE_FILE,
-            FAULTY_PART_FILE
+            FAULTY_PART_FILE,
+            RMA_FILE
         ]
 
         missing = [
@@ -972,599 +979,63 @@ class CoreWeaveTool(ctk.CTk):
     # ========================================================
 
     def run_coreweave_report(self, since=None):
-
-        # ====================================================
-        # ADDRESS PROCESSING
-        # ====================================================
-
-        self.set_worker_status(
-            "Loading address data..."
-        )
-
-        old_address_df = pd.read_excel(
-            ADDRESS_FILE,
-            dtype={
-                "Case Number": str
-            }
-        )
-
-        self.set_worker_status(
-            "Loading new address data..."
-        )
-
-        new_address_df = (
-            self.read_salesforce_excel(
-                NEW_ADDRESS_FILE
-            )
-        )
-
-        self.set_worker_status(
-            "Merging address information..."
-        )
-
-        new_address_df = pd.merge(
-            new_address_df,
-            old_address_df,
-            how="left",
-            on="Case Number"
-        )
-
-        # ----------------------------------------------------
-        # IGNORE SALESFORCE TOTAL / FOOTER ROWS
-        # ----------------------------------------------------
-
-        new_address_df = new_address_df[
-            new_address_df["Case Number"].notna()
-            & ~new_address_df["Case Number"]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .eq("total")
-        ].copy()
-
-        # ----------------------------------------------------
-        # SELECT ADDRESS COLUMNS
-        # ----------------------------------------------------
-
-        new_address_df = new_address_df[
-            [
-                "Case Number",
-                "Asset Location_x",
-                "City",
-                "State",
-                "Region"
-            ]
-        ]
-
-        new_address_df = new_address_df.rename(
-            columns={
-                "Asset Location_x":
-                    "Asset Location"
-            }
-        )
-
-        # ----------------------------------------------------
-        # BUILD EXISTING LOCATION LOOKUP
-        # ----------------------------------------------------
-
-        unique_address_df = old_address_df[
-            [
-                "Asset Location",
-                "City",
-                "State",
-                "Region"
-            ]
-        ].drop_duplicates(
-            subset=[
-                "Asset Location"
-            ]
-        )
-
-        new_address_df = pd.merge(
-            new_address_df,
-            unique_address_df,
-            how="left",
-            on="Asset Location"
-        )
-
-        # ----------------------------------------------------
-        # FILL CURRENT DATA FROM EXISTING LOCATION DATA
-        # ----------------------------------------------------
-
-        new_address_df["City_x"] = (
-            new_address_df["City_x"]
-            .fillna(
-                new_address_df["City_y"]
-            )
-        )
-
-        new_address_df["State_x"] = (
-            new_address_df["State_x"]
-            .fillna(
-                new_address_df["State_y"]
-            )
-        )
-
-        new_address_df["Region_x"] = (
-            new_address_df["Region_x"]
-            .fillna(
-                new_address_df["Region_y"]
-            )
-        )
-
-        # ----------------------------------------------------
-        # FINAL ADDRESS DATAFRAME
-        # ----------------------------------------------------
-
-        new_address_df = new_address_df[
-            [
-                "Case Number",
-                "Asset Location",
-                "City_x",
-                "State_x",
-                "Region_x"
-            ]
-        ]
-
-        new_address_df = new_address_df.rename(
-            columns={
-                "City_x": "City",
-                "State_x": "State",
-                "Region_x": "Region"
-            }
-        )
-
-        self.set_worker_status(
-            "Updating address_input.xlsx..."
-        )
-
-        new_address_df.to_excel(
-            ADDRESS_FILE,
-            index=False
-        )
-
-        # ====================================================
-        # CASE PROCESSING
-        # ====================================================
-
-        self.set_worker_status(
-            "Loading case data..."
-        )
-
-        case_df = self.read_salesforce_excel(
-            CASE_FILE
-        )
-
-        self.set_worker_status(
-            "Adding address information "
-            "to case data..."
-        )
-
-        address_df = new_address_df[
-            [
-                "Case Number",
-                "City",
-                "State",
-                "Region"
-            ]
-        ]
-
-        case_df = pd.merge(
-            case_df,
-            address_df,
-            how="left",
-            on="Case Number"
-        )
-
-        
-                # ====================================================
-        # OPTIONAL CASE CREATION DATE FILTER
-        # ====================================================
-
-        if since:
-            if "Case Creation Date" not in case_df.columns:
-                raise ValueError(
-                    "Could not find 'Case Creation Date' column."
-                )
-
-            # Convert the column from strings to datetime
-            case_df["Case Creation Date"] = pd.to_datetime(
-                case_df["Case Creation Date"],
-                errors="coerce"
-            )
-
-            # Count missing or invalid dates
-            invalid_date_count = (
-                case_df["Case Creation Date"].isna().sum()
-            )
-
-            start_date = pd.Timestamp(since)
-
-            # Keep cases created on or after the start date
-            case_df = case_df[
-                case_df["Case Creation Date"].notna()
-                & (case_df["Case Creation Date"] >= start_date)
-            ].copy()
-
-            self.set_worker_status(
-                f"Filtering from {start_date.date()}. "
-                f"Excluded {invalid_date_count} cases "
-                f"with missing/invalid dates."
-            )
-
-        print(f"Cases remaining: {len(case_df)}")
-
-
-        # ====================================================
-        # FAULTY PART PROCESSING
-        # ====================================================
-
-        self.set_worker_status(
-            "Loading faulty part data..."
-        )
-
-        faulty_part_df = (
-            self.read_salesforce_excel(
-                FAULTY_PART_FILE
-            )
-        )
-
-        self.set_worker_status(
-            "Filtering GPU parts..."
-        )
-
-        faulty_part_df = faulty_part_df[
-            [
-                "Case Number",
-                "Faulty Part Number"
-            ]
-        ]
-
-        faulty_part_df = faulty_part_df[
-            faulty_part_df[
-                "Faulty Part Number"
-            ]
-            .astype(str)
-            .str.contains(
-                "GPU",
-                na=False
-            )
-        ]
-
-        self.set_worker_status(
-            "Grouping GPU parts by case..."
-        )
-
-        faulty_part_df = (
-            faulty_part_df
-            .groupby(
-                "Case Number"
-            )[
-                "Faulty Part Number"
-            ]
-            .agg(
-                lambda x: ", ".join(
-                    x.dropna()
-                    .astype(str)
-                    .unique()
-                )
-            )
-            .reset_index()
-        )
-
-        case_df = pd.merge(
-            case_df,
-            faulty_part_df,
-            how="left",
-            on="Case Number"
-        )
-
-        # ====================================================
-        # SPLIT OUTSTANDING / SELF-MAINTENANCE
-        # ====================================================
-
-        self.set_worker_status(
-            "Building outstanding case report..."
-        )
-
-        subject_upper = (
-            case_df["Subject"]
-            .fillna("")
-            .astype(str)
-            .str.upper()
-        )
-
-        outstanding_case_df = case_df[
-            ~subject_upper.str.startswith(
-                "SELF"
-            )
-        ]
-
-        self_maint_case_df = case_df[
-            subject_upper.str.startswith(
-                "SELF"
-            )
-        ]
-
-        # ====================================================
-        # CREATE OUTPUT
-        # ====================================================
-
-        self.set_worker_status(
-            "Creating output workbook..."
-        )
-
-        with pd.ExcelWriter(
-            OUTPUT_FILE,
-            engine="openpyxl"
-        ) as writer:
-
-            outstanding_case_df.to_excel(
-                writer,
-                sheet_name="CoreWeave Outstanding Cases",
-                index=False
-            )
-
-            self_maint_case_df.to_excel(
-                writer,
-                sheet_name="Self-Maintenance",
-                index=False
-            )
-
-        self.set_worker_status(
-            "CoreWeave report completed successfully."
-        )
+        return generate_report(since=since, status_callback=self.set_worker_status)
 
     # ========================================================
-    # ADDRESS VALIDATION
-    # ========================================================
 
-    def check_address_file(
-        self,
-        update_status=True
-    ):
-
+    def check_address_file(self, update_status=True):
         if not ADDRESS_FILE.exists():
-
-            self.address_textbox.delete(
-                "1.0",
-                "end"
-            )
-
-            self.address_textbox.insert(
-                "end",
-                "address_input.xlsx does not exist yet."
-            )
-
-            if update_status:
-
-                self.set_status(
-                    "Address file not found."
-                )
-
+            self.address_textbox.delete("1.0", "end")
+            self.address_textbox.insert("end", "address_input.xlsx does not exist yet.")
             return
-
         try:
-
-            results = (
-                self.address_validator.validate()
-            )
-
-            missing_df = results["missing"]
-            inconsistent_df = results["inconsistent"]
-
-            self.address_textbox.delete(
-                "1.0",
-                "end"
-            )
-
-            # ------------------------------------------------
-            # SUMMARY
-            # ------------------------------------------------
-
-            self.address_textbox.insert(
-                "end",
-                "ADDRESS VALIDATION\n"
-                f"{'=' * 70}\n\n"
-            )
-
-            self.address_textbox.insert(
-                "end",
-                f"Unique Asset Locations: "
-                f"{results['unique_locations']}\n"
-            )
-
-            self.address_textbox.insert(
-                "end",
-                f"Missing Location Data: "
-                f"{results['missing_count']}\n"
-            )
-
-            self.address_textbox.insert(
-                "end",
-                f"Inconsistent Locations: "
-                f"{results['inconsistent_count']}\n\n"
-            )
-
-            # ------------------------------------------------
-            # MISSING LOCATIONS
-            # ------------------------------------------------
-
-            if not missing_df.empty:
-
-                self.address_textbox.insert(
-                    "end",
-                    "MISSING LOCATION INFORMATION\n"
-                    f"{'-' * 70}\n\n"
-                )
-
-                for index, row in missing_df.iterrows():
-
-                    excel_row = index + 2
-
-                    location = str(
-                        row["Asset Location"]
-                    )
-
-                    city = (
-                        "Missing"
-                        if pd.isna(row["City"])
-                        or str(row["City"]).strip() == ""
-                        else str(row["City"])
-                    )
-
-                    state = (
-                        "Missing"
-                        if pd.isna(row["State"])
-                        or str(row["State"]).strip() == ""
-                        else str(row["State"])
-                    )
-
-                    region = (
-                        "Missing"
-                        if pd.isna(row["Region"])
-                        or str(row["Region"]).strip() == ""
-                        else str(row["Region"])
-                    )
-
-                    self.address_textbox.insert(
-                        "end",
-                        f"Excel Row: {excel_row}\n"
-                        f"Asset Location: {location}\n"
-                        f"City: {city}\n"
-                        f"State: {state}\n"
-                        f"Region: {region}\n"
-                        f"{'-' * 70}\n\n"
-                    )
-
-            # ------------------------------------------------
-            # INCONSISTENT LOCATIONS
-            # ------------------------------------------------
-
-            if not inconsistent_df.empty:
-
-                self.address_textbox.insert(
-                    "end",
-                    "INCONSISTENT LOCATIONS\n"
-                    f"{'-' * 70}\n\n"
-                )
-
-                for _, row in inconsistent_df.iterrows():
-
-                    self.address_textbox.insert(
-                        "end",
-                        "Asset Location:\n"
-                        f"{row['Asset Location']}\n\n"
-                    )
-
-                    # ----------------------------------------
-                    # MAJORITY VALUE
-                    # ----------------------------------------
-
-                    majority = row["Majority"]
-
-                    self.address_textbox.insert(
-                        "end",
-                        "MAJORITY VALUE\n"
-                        f"{'-' * 30}\n"
-                        f"City: {majority['City']}\n"
-                        f"State: {majority['State']}\n"
-                        f"Region: {majority['Region']}\n\n"
-                    )
-
-                    # ----------------------------------------
-                    # CONFLICTING ROWS
-                    # ----------------------------------------
-
-                    self.address_textbox.insert(
-                        "end",
-                        "CONFLICTING ROWS\n"
-                        f"{'-' * 30}\n\n"
-                    )
-
-                    for detail in row["Rows"]:
-
-                        self.address_textbox.insert(
-                            "end",
-                            f"Excel Row: "
-                            f"{detail['Excel Row']}\n"
-                            f"Case Number: "
-                            f"{detail['Case Number']}\n"
-                            f"City: {detail['City']}\n"
-                            f"State: {detail['State']}\n"
-                            f"Region: {detail['Region']}\n\n"
-                        )
-
-                    self.address_textbox.insert(
-                        "end",
-                        f"{'-' * 70}\n\n"
-                    )
-
-            # ------------------------------------------------
-            # EVERYTHING CLEAN
-            # ------------------------------------------------
-
-            if (
-                missing_df.empty
-                and inconsistent_df.empty
-            ):
-
-                self.address_textbox.insert(
-                    "end",
-                    "✓ ADDRESS VALIDATION PASSED\n\n"
-                    "All Asset Locations have complete "
-                    "and consistent City, State, and Region data."
-                )
-
-            # ------------------------------------------------
-            # STATUS
-            # ------------------------------------------------
-
+            results = self.address_validator.validate()
+            missing = results["missing"]
+            inconsistent = results["inconsistent"]
+            lines = ["ADDRESS VALIDATION", "=" * 70,
+                     f"Unique Asset Locations: {results['unique_locations']}",
+                     f"Missing Location Data: {len(missing)}",
+                     f"Inconsistent Location Fields: {len(inconsistent)}", ""]
+            if not missing.empty:
+                lines.append("MISSING LOCATION INFORMATION")
+                for idx, row in missing.iterrows():
+                    lines.append(f"Row {idx + 2}: {row.get('Case Number', '')} | {row.get('Asset Location', '')}")
+            if not inconsistent.empty:
+                lines.extend(["", "INCONSISTENT LOCATION INFORMATION"])
+                for _, row in inconsistent.iterrows():
+                    lines.append(f"{row['Asset Location']} | {row['Field']}: {row['Observed Values']} | Cases: {row['Case Numbers']}")
+            if missing.empty and inconsistent.empty:
+                lines.append("ADDRESS VALIDATION PASSED")
+            self.address_textbox.delete("1.0", "end")
+            self.address_textbox.insert("end", "\n".join(lines))
             if update_status:
-
-                if (
-                    missing_df.empty
-                    and inconsistent_df.empty
-                ):
-
-                    self.set_status(
-                        "Address validation passed."
-                    )
-
-                else:
-
-                    self.set_status(
-                        f"Address validation found "
-                        f"{len(missing_df)} missing "
-                        f"and "
-                        f"{len(inconsistent_df)} "
-                        f"inconsistent location(s)."
-                    )
-
+                self.set_status(f"Address validation: {len(missing)} missing, {len(inconsistent)} inconsistent.")
             self.update_workflow_status()
-
-        except Exception as e:
-
-            self.address_textbox.delete(
-                "1.0",
-                "end"
-            )
-
-            self.address_textbox.insert(
-                "end",
-                f"Error checking address file:\n\n{e}"
-            )
-
+        except Exception as exc:
+            self.address_textbox.delete("1.0", "end")
+            self.address_textbox.insert("end", f"Error checking address file:\n\n{exc}")
             if update_status:
-
-                self.set_status(
-                    f"Error checking address file: {e}"
-                )
-
-            self.update_workflow_status()
+                self.set_status(f"Error checking address file: {exc}")
 
     # ========================================================
-    # OPEN ADDRESS FILE
+
+    def auto_correct_address_file(self):
+        if not ADDRESS_FILE.exists():
+            self.set_status("address_input.xlsx does not exist yet.")
+            return
+        try:
+            result = auto_correct_addresses(ADDRESS_FILE)
+            self.check_address_file(update_status=False)
+            counts = result["fields_filled"]
+            self.set_status(
+                f"Auto-corrected {result['rows_updated']} rows "
+                f"(City: {counts['City']}, State: {counts['State']}, "
+                f"Region: {counts['Region']}). "
+                "Re-generate the report to update its output."
+            )
+        except Exception as exc:
+            self.set_status(f"Auto-correction failed: {exc}")
+
     # ========================================================
 
     def open_address_file(self):
