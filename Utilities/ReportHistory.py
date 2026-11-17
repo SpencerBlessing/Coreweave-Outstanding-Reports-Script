@@ -42,6 +42,11 @@ def _status_rows(conn, day):
 def _clean_status(value):
     return str(value).strip() if value is not None else ''
 
+def previous_month(day):
+    return (
+        pd.Timestamp(day) - pd.DateOffset(months=1)
+    ).date().isoformat()
+
 
 def log_report_history(cases: pd.DataFrame, categories: pd.Series, history_folder: Path,
                        status=lambda message: None, snapshot_date=None):
@@ -63,6 +68,8 @@ def log_report_history(cases: pd.DataFrame, categories: pd.Series, history_folde
         raise ValueError('Case numbers must be populated and unique for history logging')
 
     categories = categories.reindex(cases.index)
+    if categories.isna().any():
+        raise ValueError('Missing worksheet category for some cases')
     records = []
     for idx, row in cases.iterrows():
         payload = {str(k): _value(v) for k, v in row.items()}
@@ -84,8 +91,13 @@ def log_report_history(cases: pd.DataFrame, categories: pd.Series, history_folde
 
         current = _cases_on(conn, day)
         results = []
-        for label, offset in [('Day over day', 1), ('Week over week', 7)]:
-            baseline_day = (date.fromisoformat(day) - timedelta(days=offset)).isoformat()
+        baselines = [
+            ('Day over day', (date.fromisoformat(day) - timedelta(days=1)).isoformat()),
+            ('Week over week', (date.fromisoformat(day) - timedelta(days=7)).isoformat()),
+            ('Month over month', previous_month(day)),
+        ]
+
+        for label, baseline_day in baselines:
             previous = _cases_on(conn, baseline_day)
             if not previous:
                 results.append((label, baseline_day, None, None, None, None))
@@ -126,11 +138,14 @@ def log_report_history(cases: pd.DataFrame, categories: pd.Series, history_folde
                              'H100 Thermal', 'Previous Day Total', 'New Since Previous Day',
                              'Removed Since Previous Day', 'Net Daily Change',
                              'Previous Week Total', 'New Since Previous Week',
-                             'Removed Since Previous Week', 'Net Weekly Change'])
+                             'Removed Since Previous Week', 'Net Weekly Change',
+                             'Previous Month Total', 'New Since Previous Month',
+                             'Removed Since Previous Month', 'Net Monthly Change'])  
             for logged_day in days:
                 snapshot = _cases_on(conn, logged_day)
                 prior_day = _cases_on(conn, (date.fromisoformat(logged_day) - timedelta(days=1)).isoformat())
                 prior_week = _cases_on(conn, (date.fromisoformat(logged_day) - timedelta(days=7)).isoformat())
+                prior_month = _cases_on(conn, previous_month(logged_day))
                 def changes(prior):
                     if not prior:
                         return ('', '', '', '')
@@ -141,7 +156,8 @@ def log_report_history(cases: pd.DataFrame, categories: pd.Series, history_folde
                                  sum(v == 'CoreWeave Outstanding Cases' for v in snapshot.values()),
                                  sum(v == 'Self-Maintenance' for v in snapshot.values()),
                                  sum(v == 'H100 Thermal Issues' for v in snapshot.values()),
-                                 *changes(prior_day), *changes(prior_week)])
+                                *changes(prior_day), *changes(prior_week),
+                                *changes(prior_month)])
 
     status(f'History saved: {len(records)} cases on {day} ({db_path.name})')
     status(f'Status changes detected for {day}: {status_change_count} ({status_csv_path.name})')

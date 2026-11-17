@@ -91,10 +91,7 @@ def write_dashboard(writer, cases, categories, comparison, history_folder):
         cell = ws.cell(row, left)
         cell.value = title.upper()
         cell.font = Font(name='Aptos', size=10, bold=True, color=WHITE)
-        cell.alignment = Alignment(
-            vertical='center',
-            horizontal='left'
-        )
+        cell.alignment = Alignment(vertical='center', indent=1)
         ws.row_dimensions[row].height = 27
 
     def table(row, left, headers, rows, max_rows=None):
@@ -102,11 +99,7 @@ def write_dashboard(writer, cases, categories, comparison, history_folder):
             cell = ws.cell(row, left + offset, value)
             cell.fill = PatternFill('solid', fgColor=PALE)
             cell.font = Font(name='Aptos', size=10, bold=True, color=NAVY)
-            cell.alignment = Alignment(
-                vertical='center',
-                horizontal='left',
-                wrap_text=True
-            )
+            cell.alignment = Alignment(vertical='center', wrap_text=True)
         ws.row_dimensions[row].height = 26
         limit = len(rows) if max_rows is None else max_rows
         for i in range(limit):
@@ -115,7 +108,7 @@ def write_dashboard(writer, cases, categories, comparison, history_folder):
                 value = values[j] if j < len(values) else None
                 cell = ws.cell(row + i + 1, left + j, value)
                 cell.font = Font(name='Aptos', size=10, color=TEXT)
-                cell.alignment = Alignment(vertical='center', horizontal='left')
+                cell.alignment = Alignment(vertical='center', horizontal='right' if j > 0 else 'left')
                 if i % 2:
                     cell.fill = PatternFill('solid', fgColor=ALT)
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -236,11 +229,33 @@ def write_dashboard(writer, cases, categories, comparison, history_folder):
 
     ws.merge_cells('B89:L89')
     ws['B89'] = ('Removed = no longer in the outstanding export, not necessarily resolved. '
-                 'RMA-linked = an RMA number is recorded. See Comparison for individual changes.')
+                'RMA-linked = an RMA number is recorded. See Operational Insights for individual changes.')
     ws['B89'].font = Font(name='Aptos', size=10, italic=True, color=MUTED)
     ws.row_dimensions[89].height = 28
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 3
     ws.print_area = 'B2:L89'
+
+    wb = writer.book
+
+    # Rename Comparison
+    if "Comparison" in wb.sheetnames:
+        wb["Comparison"].title = "Operational Insights"
+
+    # Reorder worksheets
+    sheet_order = [
+        "Dashboard",
+        "Operational Insights",
+        "CoreWeave Outstanding Cases",
+        "H100 Thermal Issues",
+        "Self-Maintenance",
+    ]
+
+    for index, name in enumerate(sheet_order):
+        if name in wb.sheetnames:
+            wb._sheets.insert(
+                index,
+                wb._sheets.pop(wb.sheetnames.index(name))
+            )
     return ws

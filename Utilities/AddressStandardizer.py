@@ -1,139 +1,32 @@
-"""CoreWeave site directory and conservative address/site resolution.
+"""CoreWeave address standardization and enrichment.
 
-Requires: pandas, openpyxl. The source workbook is never modified.
+CoreWeave_Map.json is the ONLY authority for canonical addresses and Site data.
+This module never learns from case history or modifies the map. An unknown or
+conflicting address is preserved as received until the map is reviewed manually.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+import argparse
 from dataclasses import dataclass
+from functools import lru_cache
+from collections import defaultdict
+import json
 from pathlib import Path
 import re
 import unicodedata
+
 import pandas as pd
 
-US_TABS = ('US-Coreweave', 'US-Albatross', 'US-Phoenix', 'US-Merlin', 'US-Osprey')
+
+DEFAULT_MAP = Path(__file__).resolve().parents[1] / 'Address Cache' / 'CoreWeave_Map.json'
+
+# Keep the same key rules used when CoreWeave_Map.json was built.
 STREET_WORDS = {
-    'rd':'road', 'dr':'drive', 'st':'street', 'ave':'avenue', 'blvd':'boulevard',
-    'pkwy':'parkway', 'cir':'circle', 'ln':'lane', 'hwy':'highway',
-    'e':'east', 'w':'west', 'n':'north', 's':'south',
+    'rd': 'road', 'dr': 'drive', 'st': 'street', 'ave': 'avenue',
+    'blvd': 'boulevard', 'pkwy': 'parkway', 'cir': 'circle',
+    'ln': 'lane', 'hwy': 'highway', 'wy': 'way',
+    'e': 'east', 'w': 'west', 'n': 'north', 's': 'south',
 }
-COUNTRIES = {'usa','us','united states','united states of america'}
-
-# Historical manually reviewed address spellings; kept separate from directory authority.
-ADDRESS_MAP = {'1 superloop cir, sparks, nv 89437-5623, usa': '1 Superloop Circle, Sparks, NV 89437-5623, USA',
- '1 superloop circle, sparks, nv 89437, usa': '1 Superloop Circle, Sparks, NV 89437-5623, USA',
- '1 superloop circle, sparks, nv 89437-5623, usa': '1 Superloop Circle, Sparks, NV 89437-5623, USA',
- '2 superloop cir, sparks, nv 89437-5623, usa': '2 Superloop Circle, Sparks, NV 89437-5623, USA',
- '2 superloop circle, sparks, nv 89437, usa': '2 Superloop Circle, Sparks, NV 89437-5623, USA',
- '2 superloop circle, sparks, nv 89437-5623, usa': '2 Superloop Circle, Sparks, NV 89437-5623, USA',
- '3 superloop cir, sparks, nv 89437, usa': '3 Superloop Circle, Sparks, NV 89437, USA',
- '3 superloop circle, sparks, nv 89437, usa': '3 Superloop Circle, Sparks, NV 89437, USA',
- 'coreweave c/o switch rno s1, 2 superloop circle, sparks, nv 89437, usa': 'CoreWeave c/o Switch RNO '
-                                                                           'Sector 1, 2 Superloop '
-                                                                           'Circle, Sparks, NV 89437, '
-                                                                           'USA',
- 'coreweave c/o switch rno, s1 2 superloop circle, sparks, nv 89437, usa': 'CoreWeave c/o Switch RNO '
-                                                                           'Sector 1, 2 Superloop '
-                                                                           'Circle, Sparks, NV 89437, '
-                                                                           'USA',
- 'coreweave c/o switch rno sector 1, 2 superloop circle, sparks, nv 89437, usa': 'CoreWeave c/o Switch '
-                                                                                 'RNO Sector 1, 2 '
-                                                                                 'Superloop Circle, '
-                                                                                 'Sparks, NV 89437, USA',
- 'coreweave c/o switch rno sector 1, sparks, nv, us, 89437': 'CoreWeave c/o Switch RNO Sector 1, '
-                                                             'Sparks, NV 89437, USA',
- 'coreweave c/o switch rno sector 1, sparks, nv 89437, usa': 'CoreWeave c/o Switch RNO Sector 1, 2 '
-                                                             'Superloop Circle, Sparks, NV 89437, USA',
- 'switch rno sector 1, coreweave c/o, 2, superloop circle, sparks, nv 89437': 'CoreWeave c/o Switch RNO '
-                                                                              'Sector 1, 2 Superloop '
-                                                                              'Circle, Sparks, NV '
-                                                                              '89437, USA',
- 'coreweave c/o switch rno sector 2, sparks, nv, us, 89437': 'CoreWeave c/o Switch RNO Sector 2, '
-                                                             'Sparks, NV 89437, USA',
- 'coreweave c/o switch rno sector 2, sparks, nv 89437, usa': 'CoreWeave c/o Switch RNO Sector 2, '
-                                                             'Sparks, NV 89437, USA',
- '100 digital crossroad drive, hammond, in, us, 46320': '100 Digital Crossroad Drive, Hammond, IN '
-                                                        '46320-3070, USA',
- '1000 coit rd, plano, tx, us, 75075': '1000 Coit Road, Plano, TX 75075-5813, USA',
- '3500 e plano pkwy, plano, tx, us, 75074': '3500 East Plano Parkway, Plano, TX 75074-7205, USA',
- '120 satellite blvd, suwanee, ga, us, 30024': '120 Satellite Boulevard, Suwanee, GA 30024-2780, USA',
- '120 satellite boulevard northwest, suwanee, ga 30024-2780, usa': '120 Satellite Boulevard, Suwanee, '
-                                                                   'GA 30024-2780, USA',
- '1401 meadowville technology pkwy, chester, va, us, 23836': '1401 Meadowville Technology Parkway, '
-                                                             'Chester, VA 23836-2843, USA',
- '1510 lookout dr richardson tx 75082': '1510 Lookout Drive, Richardson, TX 75082, USA',
- '1510 lookout dr., richardson, tx, us, 75082': '1510 Lookout Drive, Richardson, TX 75082, USA',
- '155 palmer lane, marble, nc 28905': '155 Palmer Lane, Marble, NC 28905-8506, USA',
- '1650 e. higgins road, elk grove village, il, us, 60007': '1650 East Higgins Road, Elk Grove Village, '
-                                                           'IL 60007-1606, USA',
- '1700 n river road, douglasville, ga, us, 30122': '1700 North River Road, Lithia Springs, GA '
-                                                   '30122-4043, USA',
- '1919 park avenue, weehawken, nj 07086-6712, usa': '1919 Park Avenue, Weehawken, NJ 07086-6712, USA',
- '1919 park avenue, weehawken township, nj 07086-6712, usa': '1919 Park Avenue, Weehawken, NJ '
-                                                             '07086-6712, USA',
- '200 webro road, parssippany, nj, us, 07054': '200 Webro Road, Parsippany, NJ 07054-2823, USA',
- '200 webro road, parsippany-troy hills, nj 07054-2823, usa': '200 Webro Road, Parsippany, NJ '
-                                                              '07054-2823, USA',
- '229 west 7th street, cincinnati, oh, us, 45202': '229 West 7th Street, Cincinnati, OH 45202-2308, USA',
- '3 nutmeg ln, london, gb, e14 2ax': '3 Nutmeg Lane, London E14 2AX, UK',
- '3301 hibbetts road, austin, tx, us, 78725': '3301 Hibbetts Road, Austin, TX 78725-1005, USA',
- '375 riverside pkwy, lithia springs, ga, us, 30122': '375 Riverside Parkway, Lithia Springs, GA '
-                                                      '30122-3891, USA',
- '4905 north point parkway, alpharetta, ga, us, 30009': '4905 North Point Parkway, Alpharetta, GA '
-                                                        '30022-3781, USA',
- '5660 w. badura ave nap15, las vegas, nv, us, 89118': '5660 Badura Avenue, Las Vegas, NV 89118-4712, '
-                                                       'USA',
- '7135 s decatur blvd, las vegas, nv, us, 89118': '7135 South Decatur Boulevard, Las Vegas, NV '
-                                                  '89118-4376, USA',
- '9663 87th avenue southeast, ellendale, nd, us, 58436-4501': '9663 87th Avenue Southeast, Ellendale, '
-                                                              'ND 58436-4501, USA',
- 'calle 25, 6, 08040 barcelona, spain': 'Calle 25, nº 6, Parc Logístic de la Zona Franca, 08040 '
-                                        'Barcelona, Spain',
- 'carrer 25, nº6, parc logistic de la zona franca': 'Calle 25, nº 6, Parc Logístic de la Zona Franca, '
-                                                    '08040 Barcelona, Spain',
- 'carrer 25, nº6, parc logistic de la zona franca 08040, barcelona, spain': 'Calle 25, nº 6, Parc '
-                                                                            'Logístic de la Zona '
-                                                                            'Franca, 08040 Barcelona, '
-                                                                            'Spain',
- 'de la, calle, 25, 08040 barcelona, spain': 'Calle 25, nº 6, Parc Logístic de la Zona Franca, 08040 '
-                                             'Barcelona, Spain',
- 'de la, carrer 25, 6, 08040 barcelona, spain': 'Calle 25, nº 6, Parc Logístic de la Zona Franca, 08040 '
-                                                'Barcelona, Spain',
- 'número 25 6 carrer, barcelona, es, 08040': 'Calle 25, nº 6, Parc Logístic de la Zona Franca, 08040 '
-                                             'Barcelona, Spain',
- 'avenida ribera baja, 01213 rivabellosa, alava, spain': 'Avenida Ribera Baja, 01213 Ribabellosa, '
-                                                         'Álava, Spain',
- 'avenida ribera baja, 01213, alava, spain': 'Avenida Ribera Baja, 01213 Ribabellosa, Álava, Spain',
- 'plataforma logistica arasur, avenida ribera baja, 01213 ribabellosa, alava, spain': 'Plataforma '
-                                                                                      'Logística '
-                                                                                      'ARASUR, Avenida '
-                                                                                      'Ribera Baja, '
-                                                                                      '01213 '
-                                                                                      'Ribabellosa, '
-                                                                                      'Álava, Spain',
- 'plataforma logístíca arasur avenida ribera baja': 'Plataforma Logística ARASUR, Avenida Ribera Baja, '
-                                                    '01213 Ribabellosa, Álava, Spain',
- 'avenida ribera baja, 01213 ribabellosa, álava, spain': 'Plataforma Logística ARASUR, Avenida Ribera '
-                                                         'Baja, 01213 Ribabellosa, Álava, Spain',
- 'connect way manor royal, crawley, gb, rh10 9bd': 'Unit 2 Connect Way, Manor Royal, Crawley RH10 9BD, '
-                                                   'UK',
- 'digital realty, unit 2, crawley rh10 9bd, uk': 'Unit 2 Connect Way, Manor Royal, Crawley RH10 9BD, UK',
- 'unit 2 connect way, crawley, uk': 'Unit 2 Connect Way, Manor Royal, Crawley RH10 9BD, UK',
- '99 carretera de la santa creu de calafell, sant boi de llobregat, es, 08830': 'Carretera de la Santa '
-                                                                                'Creu de Calafell, 99, '
-                                                                                '08840 Viladecans, '
-                                                                                'Barcelona, Spain',
- '2000 galloping hill road, kenilworth, nj, us, 07033': '2000 Galloping Hill Road, Kenilworth, NJ '
-                                                        '07033, USA',
- '2500 w union hills dr., phoenix, az, us, 85251': '2500 West Union Hills Drive, Phoenix, AZ 85251, USA'}
-
-SITE_ADDRESS_ALIASES = {'7135 South Decatur Boulevard, Las Vegas, NV 89118-4376, USA': 'US-LAS01',
- '5660 Badura Avenue, Las Vegas, NV 89118-4712, USA': 'US-LAS03',
- '1510 Lookout Drive, Richardson, TX 75082, USA': 'US-RIN01',
- '1650 East Higgins Road, Elk Grove Village, IL 60007-1606, USA': 'US-EVI01',
- '229 West 7th Street, Cincinnati, OH 45202-2308, USA': 'US-CVG01',
- '200 Webro Road, Parsippany, NJ 07054-2823, USA': 'US-PPY01',
- '1401 Meadowville Technology Parkway, Chester, VA 23836-2843, USA': 'US-CSZ01'}
 
 
 def clean(value) -> str:
@@ -144,41 +37,340 @@ def clean(value) -> str:
 
 
 def address_key(value) -> str:
-    """Matching-only key. Does not modify source or published address."""
-    s = unicodedata.normalize('NFKD', clean(value)).encode('ascii', 'ignore').decode().casefold()
-    s = re.sub(r'\b([a-z]{2})\s+(\d{5})-\d{4}\b', r'\1 \2', s)
-    s = re.sub(r'\b(?:usa|united states of america|united states)\b', '', s)
-    s = re.sub(r'[^a-z0-9]+', ' ', s)
-    words = s.split()
-    words = [STREET_WORDS.get(w, w) for w in words]
-    return ' '.join(words)
+    """Matching key only; never a replacement for a canonical map address."""
+    text = unicodedata.normalize('NFKD', clean(value)).encode(
+        'ascii', 'ignore'
+    ).decode().casefold()
+    text = re.sub(r'\b([a-z]{2})\s+(\d{5})-\d{4}\b', r'\1 \2', text)
+    text = re.sub(r'\b(?:usa|united states of america|united states)\b', '', text)
+    words = re.sub(r'[^a-z0-9]+', ' ', text).split()
+    return ' '.join(STREET_WORDS.get(word, word) for word in words)
+
+
+# These rules affect comparison only. They never change published map records.
+DIRECTIONS = {
+    'n': 'north', 's': 'south', 'e': 'east', 'w': 'west',
+    'ne': 'northeast', 'nw': 'northwest', 'se': 'southeast', 'sw': 'southwest',
+}
+STREET_TYPES = {
+    'road', 'street', 'drive', 'avenue', 'boulevard', 'parkway',
+    'circle', 'lane', 'highway', 'way', 'place', 'court', 'terrace',
+    'trail', 'loop',
+}
+DIRECTION_WORDS = set(DIRECTIONS.values())
+US_STATE_CODES = {
+    'al', 'ak', 'az', 'ar', 'ca', 'co', 'ct', 'de', 'fl', 'ga', 'hi',
+    'id', 'il', 'in', 'ia', 'ks', 'ky', 'la', 'me', 'md', 'ma', 'mi',
+    'mn', 'ms', 'mo', 'mt', 'ne', 'nv', 'nh', 'nj', 'nm', 'ny', 'nc',
+    'nd', 'oh', 'ok', 'or', 'pa', 'ri', 'sc', 'sd', 'tn', 'tx', 'ut',
+    'vt', 'va', 'wa', 'wv', 'wi', 'wy', 'dc',
+}
+
+
+def _postal_code(text: str) -> str:
+    """Extract a postal code for comparison, without altering the source."""
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode().upper()
+    # Preserve Swedish 3+2 postal groups (e.g. 791 77).
+    if re.search(r'\b(?:SWEDEN|SVERIGE|SE)\b', text):
+        match = re.search(r'\b\d{3}\s+\d{2}\b', text)
+        if match:
+            return re.sub(r'\D', '', match.group())
+    # Prefer explicit British or Canadian alphanumeric codes over digit-only ZIPs.
+    for pattern in (
+        r'\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b',
+        r'\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b',
+        r'\b\d{5}(?:-\d{4})?\b',
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return re.sub(r'\W', '', match.group()).upper()[:5] if match.group()[0].isdigit() else re.sub(r'\W', '', match.group()).upper()
+    return ''
+
+
+def _address_profile(text: str):
+    """Physical street + location identity, deliberately not fuzzy/geocoded.
+
+    Restrict indexing to the primary address; a parenthetical shipping note
+    must NEVER become an alternative address (e.g. Coit Rd vs Jomar Dr).
+    """
+    original = clean(text)
+    primary = re.split(r'\s*\(|\s+-\s+(?=coreweave|shipping|ship\b)', original, maxsplit=1, flags=re.I)[0]
+    words = address_key(primary).split()
+    words = [DIRECTIONS.get(word, word) for word in words]
+    # Written-out street ordinals and their numeric equivalents denote the
+    # same street (e.g. West Seventh St == W 7th St). Matching only.
+    ordinal_names = {
+        'first': '1st', 'second': '2nd', 'third': '3rd',
+        'fourth': '4th', 'fifth': '5th', 'sixth': '6th',
+        'seventh': '7th', 'eighth': '8th', 'ninth': '9th',
+        'tenth': '10th',
+    }
+    words = [ordinal_names.get(word, word) for word in words]
+    # Comparison-only spelling correction. Published names always come from the map.
+    words = [{'parssippany': 'parsippany'}.get(word, word) for word in words]
+    # A valid street number must be followed by a street name and type, without
+    # another building number in between ("Sector 1, 2 Superloop Circle").
+    start = end = None
+    for i, word in enumerate(words):
+        if not re.fullmatch(r'\d{1,5}', word):
+            continue
+        for j in range(i + 2, min(i + 8, len(words))):
+            if words[j] in STREET_TYPES and not any(w.isdigit() for w in words[i + 1:j]):
+                start, end = i, j
+                break
+        if start is not None:
+            break
+    if start is None:
+        # Spanish numbered streets: "Calle 25 nº6", "Carrer 25, 6" and
+        # "número 25 6 carrer" are equivalent. Street number and building
+        # number MUST remain ordered: Calle 6 nº25 is a different street.
+        if any(w in {'calle', 'carrer'} for w in words):
+            expanded = []
+            for word in words:
+                match = re.fullmatch(r'(?:n|no|num|numero)(\d+)', word)
+                expanded.extend(['numero', match.group(1)] if match else [word])
+            postal = _postal_code(primary)
+            # Don't mistake the postal code for a building number.
+            nums = [w for w in expanded if w.isdigit() and w != postal]
+            locality = frozenset(w for w in expanded if w in {'barcelona', 'madrid'})
+            if len(nums) in (1, 2) and postal and locality:
+                return {
+                    'number': '/'.join(nums) if len(nums) == 2 else nums[0] + '/?',
+                    'stem': ('spanish_street',), 'direction': (),
+                    'postal': postal, 'locality': locality, 'unit': '',
+                    'partial_house': len(nums) == 1,
+                }
+        for i, word in enumerate(words):
+            if word in {'avenida', 'av', 'avda'}:
+                street = words[i + 1:i + 3]
+                if len(street) == 2 and all(w.isalpha() for w in street):
+                    postal = _postal_code(primary)
+                    tail = [w for w in words[i + 3:] if w not in {
+                        'spain', 'espana', 'plataforma', 'logistica', 'arasur'
+                    } and not w.isdigit()]
+                    return {
+                        'number': '', 'stem': ('avenida', *street),
+                        'direction': (), 'postal': postal,
+                        'locality': frozenset(tail), 'unit': '',
+                    }
+        # Swedish street names can appear before or after the house number.
+        # Match only with a Swedish postal format and country indicator.
+        if (re.search(r'\b(?:sweden|sverige|se)\b', primary, re.I)
+                and re.search(r'\b\d{3}\s+\d{2}\b', primary)):
+            for i, word in enumerate(words):
+                if not (len(word) >= 7 and word.endswith(('vagen', 'gatan', 'grand'))):
+                    continue
+                adjacent = (i + 1 if i + 1 < len(words) and words[i + 1].isdigit()
+                            else i - 1 if i > 0 and words[i - 1].isdigit() else None)
+                if adjacent is None:
+                    continue
+                return {
+                    'number': words[adjacent], 'stem': ('swedish_street', word),
+                    'direction': (), 'postal': _postal_code(primary),
+                    'locality': frozenset(w for j, w in enumerate(words)
+                                          if j not in (i, adjacent) and w.isalpha()
+                                          and w not in {'sweden', 'sverige', 'se'}),
+                    'unit': '',
+                }
+        return None
+
+    street_words = words[start + 1:end]
+    stem = tuple(w for w in street_words if w not in DIRECTION_WORDS)
+    # Do not erase the street name or its type, even if abbreviated.
+    if not stem:
+        return None
+    # The direction can be omitted by Salesforce, but conflicting directions
+    # are never interchangeable.
+    direction = tuple(w for w in street_words if w in DIRECTION_WORDS)
+    trailing = words[end + 1:]
+    # 'Avenue SE' and 'Drive NW' are part of the street, not the city.
+    if trailing and trailing[0] in DIRECTION_WORDS:
+        direction = tuple(sorted(set(direction + (trailing[0],))))
+        trailing = trailing[1:]
+    post = _postal_code(primary)
+    explicit_subunit = trailing.pop(0) if trailing and trailing[0].isdigit() and trailing[0] != post else ''
+    trailing = [w for w in trailing if w not in US_STATE_CODES and w not in {
+        'usa', 'us', 'united', 'states', 'kingdom', 'uk', 'gb', 'canada', 'spain',
+        'espana', 'sweden', 'norway',
+    } and not re.fullmatch(r'\d{5}|\d{9}', w)]
+    # A postal fragment like E14/2AX should not be considered a locality.
+    trailing = [w for w in trailing if not any(ch.isdigit() for ch in w)]
+    # Guard against silently merging subunits at the same street address.
+    unit = re.search(r'(?:\b(?:suite|ste|unit|floor|fl|building|bldg|hall)\s*|#\s*)([a-z0-9-]+)', primary, re.I)
+    unit_value = unit.group(1).casefold() if unit and unit.start() > original.casefold().find(str(words[start])) else explicit_subunit
+    markers = frozenset(re.findall(r'\b(?:nap|hall|sector|phase)\s*-?\s*\d+\b', primary.casefold()))
+    return {
+        'number': words[start], 'stem': stem, 'direction': direction,
+        'postal': post, 'locality': frozenset(trailing), 'unit': unit_value,
+        'markers': markers,
+    }
+
+
+def _compatible_profiles(incoming: dict, mapped: dict) -> bool:
+    if incoming.get('partial_house') and incoming['stem'] == ('spanish_street',):
+        # Omitted building number is acceptable only when postal AND city
+        # agree and the map yields exactly one possible address later.
+        if not mapped['number'].startswith(incoming['number'][:-1]):
+            return False
+        if not (incoming['postal'] and incoming['postal'] == mapped['postal']
+                and incoming['locality'] & mapped['locality']):
+            return False
+    elif (incoming['number'], incoming['stem']) != (mapped['number'], mapped['stem']):
+        return False
+    if incoming['direction'] and mapped['direction'] and incoming['direction'] != mapped['direction']:
+        return False
+    if incoming['unit'] != mapped['unit']:
+        return False
+    if incoming.get('markers', frozenset()) != mapped.get('markers', frozenset()):
+        return False
+    # A different ZIP is not a formatting discrepancy and must not be guessed.
+    if incoming['postal'] and mapped['postal'] and incoming['postal'] != mapped['postal']:
+        return False
+    left, right = incoming['locality'], mapped['locality']
+    if left and right and not (left & right):
+        return False
+    # NAP identifiers and similar hall tags are physical differentiators.
+    hall_pattern = re.compile(r'^(?:nap|hall|sector|phase)\w*\d+$')
+    halls_a = {w for w in left if hall_pattern.fullmatch(w)}
+    halls_b = {w for w in right if hall_pattern.fullmatch(w)}
+    if halls_a != halls_b:
+        return False
+    # Require a shared postcode or a location anchor, not just the street name.
+    if incoming['postal'] and mapped['postal']:
+        return True
+    return bool(left and right and left & right)
+
+
+
+
+def _verified_variant_match(incoming: dict, mapped: dict, original: str, record: dict) -> bool:
+    """Permit only verified historical representations of a map location.
+
+    These are comparison rules, not alternate address authorities. In every
+    case the complete canonical address and all metadata come from the map.
+    The normal unique-candidate and conflict checks still apply.
+    """
+    if (incoming['number'], incoming['stem']) != (mapped['number'], mapped['stem']):
+        return False
+    if incoming['direction'] != mapped['direction'] or incoming['unit'] != mapped['unit']:
+        return False
+
+    source_words = set(address_key(original).split())
+    canonical_city = address_key(record.get('city'))
+    canonical_state = clean(record.get('state')).casefold()
+    house, stem = incoming['number'], incoming['stem']
+    old_post, new_post = incoming['postal'], mapped['postal']
+    old_city = incoming['locality']
+    markers = incoming.get('markers', frozenset())
+    mapped_markers = mapped.get('markers', frozenset())
+
+    # Both ZIPs are documented for this street; map's 30022 wins.
+    if (house == '4905' and stem == ('point',)
+            and old_post == '30009' and new_post == '30022'
+            and canonical_city == 'alpharetta' and canonical_state == 'ga'
+            and 'ga' in source_words and 'alpharetta' in old_city
+            and markers == mapped_markers):
+        return True
+
+    # Douglasville is the historic municipality for the same 1700 N River Rd.
+    if (house == '1700' and stem == ('river',)
+            and old_post == new_post == '30122'
+            and canonical_city == 'lithia springs' and canonical_state == 'ga'
+            and 'ga' in source_words and 'douglasville' in old_city
+            and markers == mapped_markers):
+        return True
+
+    # Old Grand Rapids mailing locality/ZIP, same 6100 E Paris Ave SE.
+    if (house == '6100' and stem == ('paris',)
+            and old_post == '49512' and new_post == '49316'
+            and canonical_city == 'caledonia' and canonical_state == 'mi'
+            and 'mi' in source_words and {'grand', 'rapids'} <= old_city
+            and markers == mapped_markers):
+        return True
+
+    # NAP15 is a verified facility identifier at 5660 W Badura, not a
+    # different house number. The map remains authoritative for the Site.
+    if (house == '5660' and stem == ('badura',)
+            and old_post == new_post == '89118'
+            and canonical_city == 'las vegas' and canonical_state == 'nv'
+            and 'nv' in source_words and {'las', 'vegas'} <= old_city
+            and markers == frozenset({'nap15'}) and not mapped_markers):
+        return True
+
+    # West Sussex is a broader administrative area for the verified Unit 2
+    # Connect Way location. Require explicit unit, street, and UK country;
+    # an omitted postcode alone is NOT adequate for any other address.
+    if (house == '2' and stem == ('connect',)
+            and not old_post and new_post == 'RH109BD'
+            and canonical_city == 'crawley'
+            and canonical_state in {'united kingdom', 'uk', 'gb'}
+            and re.search(r'\bunit\s*2\b', original, re.I)
+            and 'sussex' in old_city
+            and source_words & {'uk', 'gb'}
+            and markers == mapped_markers):
+        return True
+
+    # The ARASUR campus can be identified by its distinctive name and the
+    # full Avenida Ribera Baja street, even when the postcode is omitted.
+    if (not house and stem == ('avenida', 'ribera', 'baja')
+            and not old_post and new_post == '01213'
+            and canonical_city == 'rivabellosa' and canonical_state == 'spain'
+            and {'plataforma', 'logistica', 'arasur'} <= source_words
+            and markers == mapped_markers):
+        return True
+
+    return False
+
+
+def _verified_incomplete_street(text: str, by_address: dict, conflicts: dict):
+    """Resolve a uniquely identified Crawley street when the unit is omitted.
+
+    The incoming address must contain the estate, city AND full postcode.
+    Never choose between two units/buildings at the same street and postcode.
+    """
+    words = set(address_key(text).split())
+    if not {'connect', 'way', 'manor', 'royal', 'crawley'} <= words:
+        return None, 'unmatched'
+    if _postal_code(text) != 'RH109BD':
+        return None, 'unmatched'
+    if re.search(r'\b(?:unit|suite|building|bldg|#)\s*\w+', text, re.I):
+        return None, 'unmatched'
+    if re.search(r'\b\d{1,5}\b', re.sub(r'\bRH10\s*9BD\b', '', text, flags=re.I)):
+        return None, 'unmatched'
+
+    hits = {}
+    for record in by_address.values():
+        if not isinstance(record, dict):
+            continue
+        if (address_key(record.get('city')) != 'crawley'
+                or clean(record.get('state')).casefold() not in {'united kingdom', 'uk', 'gb'}):
+            continue
+        canonical = clean(record.get('address'))
+        if _postal_code(canonical) != 'RH109BD':
+            continue
+        profile = _address_profile(canonical)
+        if not profile or profile['stem'] != ('connect',):
+            continue
+        if not {'manor', 'royal'} <= profile['locality']:
+            continue
+        key = address_key(canonical)
+        if key in conflicts:
+            return None, 'conflict'
+        hits[(key, clean(record.get('site')), clean(record.get('locode')))] = record
+    if len(hits) == 1:
+        return next(iter(hits.values())), 'matched'
+    return None, 'conflict' if len(hits) > 1 else 'unmatched'
 
 
 def standardize_us_zip(value):
-    """Reduce US ZIP+4 to ZIP5 for display; leave other postal formats alone."""
+    """Formatting helper only. This does not identify or verify an address."""
     if not isinstance(value, str):
         return value
     return re.sub(r'\b([A-Z]{2})\s+(\d{5})-\d{4}\b', r'\1 \2', value, flags=re.I)
 
 
-def standardize_address(value, registry=None, locode=None, site_name=None) -> str:
-    """Legacy correction + verified site address, never overwrite a conflict."""
-    original = clean(value)
-    if not original:
-        return original
-    corrected = standardize_us_zip(ADDRESS_MAP.get(original.casefold(), original))
-    if registry is None:
-        return corrected
-    result = registry.resolve(address=original, locode=locode, site_name=site_name)
-    if result.status == 'matched' and result.site and result.site.address:
-        # A site-name-only match does not verify a supplied street address.
-        if result.method != 'site_name' or not original:
-            return result.site.address
-    return corrected if result.status != 'conflict' else original
-
-
 def physical_address(value) -> str:
-    """Preserve address as supplied, except whitespace. Never infer from shipping notes."""
+    """Preserve physical/shipping address text except for extra whitespace."""
     return clean(value)
 
 
@@ -186,149 +378,293 @@ def physical_address(value) -> str:
 class Site:
     locode: str
     site_name: str
-    region: str
+    region: str                 # Geographic reporting region (not the Site code).
     data_hall: str
     facility: str
     address: str
     source_sheet: str
+    site_code: str = ''          # CoreWeave Site identifier, e.g. US-WEST-09.
+    city: str = ''
+    state: str = ''
+    customer: str = ''
+
+    @property
+    def reporting_site(self) -> str:
+        """Use the verified LoCode only when the map has no Site code."""
+        return self.site_code or self.locode
+
+    @property
+    def reporting_site_source(self) -> str:
+        if self.site_code:
+            return 'Site'
+        return 'LoCode fallback' if self.locode else ''
 
 
 @dataclass(frozen=True)
 class Resolution:
-    status: str  # matched, ambiguous, conflict, unmatched
-    method: str
+    status: str                 # matched, conflict, unmatched
+    method: str                 # address, locode, address_vs_locode, or none
     site: Site | None = None
     candidates: tuple[str, ...] = ()
 
 
+def _site_from_record(record: dict) -> Site:
+    return Site(
+        locode=clean(record.get('locode')).upper(),
+        site_name=clean(record.get('site_name')),
+        region=clean(record.get('region')),
+        data_hall=clean(record.get('data_hall')),
+        facility=clean(record.get('facility')),
+        address=clean(record.get('address')),
+        source_sheet=clean(record.get('source')),
+        site_code=clean(record.get('site')),
+        city=clean(record.get('city')),
+        state=clean(record.get('state')),
+        customer=clean(record.get('customer')),
+    )
+
+
 class SiteRegistry:
-    def __init__(self, sites: list[Site], aliases: dict[str, str] | None = None):
-        self.sites = sites
-        self.by_locode = defaultdict(list)
-        self.by_address = defaultdict(set)
-        self.by_name = defaultdict(set)
-        for site in sites:
-            self.by_locode[site.locode].append(site)
-            if site.address:
-                self.by_address[address_key(site.address)].add(site.locode)
-            if site.site_name:
-                self.by_name[site.site_name.casefold()].add(site.locode)
-        self.aliases = {}
-        for raw, locode in {**SITE_ADDRESS_ALIASES, **(aliases or {})}.items():
-            key = address_key(raw)
-            code = clean(locode).upper()
-            if code not in self.by_locode:
-                raise ValueError(f'Alias references unknown LoCode: {code}')
-            if key in self.aliases and self.aliases[key] != code:
-                raise ValueError(f'Conflicting alias for {raw}')
-            self.aliases[key] = code
+    """Read-only view of the single CoreWeave map, with no separate lookup data."""
+
+    def __init__(self, map_path: str | Path | None = None):
+        self.map_path = Path(map_path) if map_path is not None else DEFAULT_MAP
+        if not self.map_path.is_file():
+            raise FileNotFoundError(f'CoreWeave map not found: {self.map_path}')
+
+        with self.map_path.open('r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict) or not all(
+            isinstance(data.get(name), dict)
+            for name in ('by_address', 'by_locode', 'conflicts')
+        ):
+            raise ValueError('CoreWeave map must contain by_address, by_locode and conflicts objects')
+
+        self.by_address = data['by_address']
+        self.by_locode = data['by_locode']
+        self.address_conflicts = data['conflicts'].get('address', {})
+        self.locode_conflicts = data['conflicts'].get('locode', {})
+        if not isinstance(self.address_conflicts, dict) or not isinstance(self.locode_conflicts, dict):
+            raise ValueError('CoreWeave map conflicts must contain address/locode dictionaries')
+        self.sites = [_site_from_record(record) for record in data.get('records', [])]
+
+        # Recognize all explicit map conflicts, even keys omitted from by_address.
+        self._conflict_profiles = [_address_profile(key) for key in self.address_conflicts]
+        self._conflict_profiles = [p for p in self._conflict_profiles if p is not None]
+
+        # Ephemeral index built from the SAME map, not a second address cache.
+        # Include existing confirmed by_address aliases as searchable spellings.
+        self._street_index = defaultdict(list)
+        seen = set()
+        for key, record in self.by_address.items():
+            if not isinstance(record, dict):
+                raise ValueError(f'Invalid CoreWeave map address entry: {key}')
+            for candidate_text in (key, record.get('address', '')):
+                profile = _address_profile(candidate_text)
+                if profile is None:
+                    continue
+                identity = (key, candidate_text)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                self._street_index[(profile['number'], profile['stem'])].append((profile, record))
+                if (profile['stem'] == ('spanish_street',)
+                        and '/' in profile['number'] and not profile.get('partial_house')):
+                    street_number = profile['number'].split('/', 1)[0]
+                    self._street_index[(street_number + '/?', profile['stem'])].append((profile, record))
 
     @classmethod
-    def from_workbook(cls, path: str | Path, aliases: dict[str, str] | None = None):
-        path = Path(path)
-        sheets = pd.read_excel(path, sheet_name=list(US_TABS) + ['EMEA Sites'], dtype=str)
-        sites = []
-        seen = set()
-        for sheet, df in sheets.items():
-            df.columns = [clean(c) for c in df.columns]
-            if sheet == 'EMEA Sites':
-                # EMEA uses first column as LoCode; 'Site' is a region code.
-                mappings = [('Unoffical site name', 'Location', 'Site', 'Data Hall', 'DC Facility', 'DC Address')]
-            else:
-                name_field = 'Es' if sheet == 'US-Osprey' else 'Unoffical site name'
-                mappings = [('LoCode', name_field, 'Region name', 'Data Hall', 'DC Facility', 'DC Address')]
-            for code_col, name_col, region_col, hall_col, facility_col, address_col in mappings:
-                if not all(col in df for col in (code_col, name_col, region_col, hall_col, facility_col, address_col)):
-                    raise ValueError(f'Unexpected columns in {sheet}')
-                for _, row in df.iterrows():
-                    code = clean(row[code_col]).upper()
-                    address = physical_address(row[address_col])
-                    if not re.fullmatch(r'[A-Z]{2}-[A-Z0-9]+', code) or not address:
-                        continue
-                    record = Site(code, clean(row[name_col]), clean(row[region_col]),
-                                  clean(row[hall_col]), clean(row[facility_col]), address, sheet)
-                    # Preserve different data halls and source entries; drop identical rows only.
-                    signature = (record.locode, record.data_hall, address_key(record.address), sheet)
-                    if signature not in seen:
-                        sites.append(record)
-                        seen.add(signature)
-        return cls(sites, aliases)
+    def from_map(cls, path: str | Path | None = None) -> SiteRegistry:
+        return cls(path)
+
+    def _unique_facility_postcode_unit(self, text: str):
+        """Resolve an incomplete street address only with multiple independent anchors.
+
+        Example: Digital Realty, Unit 2, Crawley RH10 9BD can identify a
+        canonical Unit 2 address from the map when the facility, postal code,
+        unit number, and city all agree uniquely. A facility name by itself
+        never establishes an address.
+        """
+        postal = _postal_code(text)
+        unit_match = re.search(r'\bunit\s*#?\s*([a-z0-9-]+)\b', text, re.I)
+        if not postal or unit_match is None:
+            return None, 'unmatched'
+        unit = unit_match.group(1).casefold()
+        incoming_words = set(address_key(text).split())
+        hits = {}
+        for record in self.by_address.values():
+            canonical = clean(record.get('address'))
+            if _postal_code(canonical) != postal:
+                continue
+            mapped_unit = re.search(r'\bunit\s*#?\s*([a-z0-9-]+)\b', canonical, re.I)
+            if mapped_unit is None or mapped_unit.group(1).casefold() != unit:
+                continue
+            city = clean(record.get('city'))
+            if not city or not set(address_key(city).split()).issubset(incoming_words):
+                continue
+            facility_words = [word for word in address_key(record.get('facility')).split()
+                              if len(word) >= 4 and word not in {
+                                  'datacenter', 'centre', 'center', 'facility', 'building',
+                              }]
+            if len(facility_words) < 2 or not set(facility_words).issubset(incoming_words):
+                continue
+            canonical_key = address_key(canonical)
+            if canonical_key in self.address_conflicts:
+                return None, 'conflict'
+            hits[(canonical_key, clean(record.get('site')), clean(record.get('locode')))] = record
+        if len(hits) == 1:
+            return next(iter(hits.values())), 'matched'
+        return None, 'conflict' if len(hits) > 1 else 'unmatched'
+
+    @lru_cache(maxsize=8192)
+    def _flexible_lookup(self, text: str):
+        """Return (record, status) only when one map identity is supported."""
+        profile = _address_profile(text)
+        if profile is None:
+            record, status = self._unique_facility_postcode_unit(text)
+            if status != 'unmatched':
+                return record, status
+            return _verified_incomplete_street(text, self.by_address, self.address_conflicts)
+        # Known ambiguous addresses must remain ambiguous when prefixes are omitted.
+        if any(_compatible_profiles(profile, bad) for bad in self._conflict_profiles):
+            return None, 'conflict'
+        hits = {}
+        for candidate, record in self._street_index.get((profile['number'], profile['stem']), []):
+            if not (_compatible_profiles(profile, candidate)
+                    or _verified_variant_match(profile, candidate, text, record)):
+                continue
+            canonical_key = address_key(record.get('address'))
+            # Preserve known contradictions even when Salesforce omits prefixes.
+            if canonical_key in self.address_conflicts:
+                return None, 'conflict'
+            # Identical LoCode with different physical locations should not be
+            # collapsed, nor should conflicting map records be arbitrarily chosen.
+            hits[(canonical_key, clean(record.get('site')), clean(record.get('locode')))] = record
+        if len(hits) == 1:
+            return next(iter(hits.values())), 'matched'
+        return None, 'conflict' if len(hits) > 1 else 'unmatched'
 
     def resolve(self, address=None, locode=None, site_name=None) -> Resolution:
-        key = address_key(address)
+        """Resolve the address first; a LoCode cannot certify an unknown address.
+
+        A unique LoCode can supply an address only when the address is empty.
+        `site_name` is retained for caller compatibility but is not used for
+        guessing a street address or Site assignment.
+        """
+        raw_address = clean(address)
+        key = address_key(raw_address)
         code = clean(locode).upper()
-        name = clean(site_name).casefold()
-        address_matches = set(self.by_address.get(key, ())) if key else set()
-        if key in self.aliases:
-            address_matches.add(self.aliases[key])
-        # Existing manually standardized addresses can bridge directory spellings.
-        corrected = ADDRESS_MAP.get(clean(address).casefold())
-        if corrected:
-            corrected_key = address_key(corrected)
-            address_matches.update(self.by_address.get(corrected_key, ()))
-            if corrected_key in self.aliases:
-                address_matches.add(self.aliases[corrected_key])
-        code_matches = {code} if code in self.by_locode else set()
-        name_matches = set(self.by_name.get(name, ())) if name else set()
-        if code_matches and address_matches and not (code_matches & address_matches):
-            return Resolution('conflict', 'locode_vs_address', candidates=tuple(sorted(code_matches | address_matches)))
-        if code_matches and name_matches and not (code_matches & name_matches):
-            return Resolution('conflict', 'locode_vs_site_name', candidates=tuple(sorted(code_matches | name_matches)))
-        if address_matches and name_matches and not (address_matches & name_matches):
-            return Resolution('conflict', 'address_vs_site_name', candidates=tuple(sorted(address_matches | name_matches)))
-        if code_matches:
-            matches, method = code_matches, 'locode'
-        elif address_matches:
-            matches, method = address_matches, 'address'
-        elif name_matches:
-            matches, method = name_matches, 'site_name'
-        else:
+
+        if key:
+            if key in self.address_conflicts:
+                choices = self.address_conflicts[key].get('sites', [])
+                return Resolution('conflict', 'address', candidates=tuple(choices))
+
+            record = self.by_address.get(key)
+            method = 'address'
+            if record is None:
+                # Use normalization and unique physical address identity, not
+                # invented aliases or similarity guesses, to find map records.
+                record, status = self._flexible_lookup(raw_address)
+                if status != 'matched':
+                    return Resolution(status, 'normalized_address')
+                method = 'normalized_address'
+            if not isinstance(record, dict):
+                raise ValueError(f'Invalid CoreWeave map address entry: {key}')
+
+            mapped_code = clean(record.get('locode')).upper()
+            if code and mapped_code and code != mapped_code:
+                return Resolution(
+                    'conflict', 'address_vs_locode',
+                    candidates=tuple(sorted({code, mapped_code})),
+                )
+            return Resolution('matched', method, _site_from_record(record), (mapped_code,))
+
+        if not code:
             return Resolution('unmatched', 'none')
-        if len(matches) != 1:
-            return Resolution('ambiguous', method, candidates=tuple(sorted(matches)))
-        matched_code = next(iter(matches))
-        records = self.by_locode[matched_code]
-        # One LoCode can have multiple halls or addresses. Never silently choose one.
-        if len({address_key(s.address) for s in records}) > 1:
-            narrowed = [s for s in records if address_key(s.address) == key]
-            if narrowed:
-                return Resolution('matched', method, narrowed[0], (matched_code,))
-            return Resolution('ambiguous', 'multiple_addresses_for_locode', candidates=(matched_code,))
-        return Resolution('matched', method, records[0], (matched_code,))
+        if code in self.locode_conflicts:
+            choices = self.locode_conflicts[code].get('sites', [])
+            return Resolution('conflict', 'locode', candidates=tuple(choices))
+        record = self.by_locode.get(code)
+        if record is None:
+            return Resolution('unmatched', 'locode')
+        if not isinstance(record, dict):
+            raise ValueError(f'Invalid CoreWeave map LoCode entry: {code}')
+        return Resolution('matched', 'locode', _site_from_record(record), (code,))
 
     def enrich(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add fields without overwriting source columns or silently fixing conflicts."""
-        results = []
+        """Add map-derived fields without overwriting the incoming source fields."""
+        records = []
         for row in df.to_dict('records'):
             result = self.resolve(row.get('Asset Location'), row.get('LoCode'), row.get('Site'))
             site = result.site
-            results.append({
+            records.append({
                 'Match Status': result.status,
                 'Match Method': result.method,
                 'Matched LoCode': site.locode if site else '',
                 'Matched Site': site.site_name if site else '',
-                'Standardized Address': standardize_address(row.get('Asset Location'), self, row.get('LoCode'), row.get('Site')),
+                'Directory Site': site.site_code if site else '',
+                'Reporting Site': site.reporting_site if site else '',
+                'Reporting Site Source': site.reporting_site_source if site else '',
+                'Standardized Address': site.address if site else clean(row.get('Asset Location')),
+                'Directory City': site.city if site else '',
+                'Directory State': site.state if site else '',
                 'Directory Region': site.region if site else '',
                 'Directory Facility': site.facility if site else '',
+                'Directory Data Hall': site.data_hall if site else '',
+                'Directory Customer': site.customer if site else '',
                 'Match Candidates': ', '.join(result.candidates),
             })
-        return pd.concat([df.reset_index(drop=True), pd.DataFrame(results)], axis=1)
+        enriched = df.reset_index(drop=True).copy()
+        if records:
+            derived = pd.DataFrame(records)
+            for column in derived:
+                if column not in enriched.columns:
+                    enriched[column] = derived[column]
+        return enriched
+
+
+@lru_cache(maxsize=8)
+def _cached_registry(path: str, modified_ns: int, size: int) -> SiteRegistry:
+    """In-memory reuse only; edits to the map invalidate the cache."""
+    return SiteRegistry.from_map(path)
+
+
+def default_registry() -> SiteRegistry:
+    map_path = DEFAULT_MAP.resolve()
+    stat = map_path.stat()  # Clear FileNotFoundError if the sole map is missing.
+    return _cached_registry(str(map_path), stat.st_mtime_ns, stat.st_size)
+
+
+def standardize_address(value, registry=None, locode=None, site_name=None) -> str:
+    """Return the map's canonical address, or keep an unmatched address intact."""
+    original = clean(value)
+    if not original and not clean(locode):
+        return original
+    registry = registry if registry is not None else default_registry()
+    result = registry.resolve(original, locode, site_name)
+    return result.site.address if result.status == 'matched' and result.site else original
 
 
 def get_site_reference(address, registry=None, locode=None, site_name=None):
-    """Compatibility helper; return site metadata for confident matches only."""
-    if registry is None:
-        return None
-    result = registry.resolve(address=address, locode=locode, site_name=site_name)
+    """Return verified map fields, or None for unknown/conflicting addresses."""
+    registry = registry if registry is not None else default_registry()
+    result = registry.resolve(address, locode, site_name)
     if result.status != 'matched' or result.site is None:
         return None
     site = result.site
-    return {'site_name': site.site_name, 'locode': site.locode, 'region': site.region,
-            'data_hall': site.data_hall, 'facility': site.facility, 'address': site.address}
+    return {
+        'site_name': site.site_name, 'site': site.reporting_site,
+        'map_site': site.site_code, 'site_source': site.reporting_site_source,
+        'locode': site.locode, 'city': site.city, 'state': site.state,
+        'region': site.region, 'facility': site.facility,
+        'data_hall': site.data_hall, 'customer': site.customer,
+        'address': site.address,
+    }
 
 
 def extract_site(subject):
-    """Extract site identifier from Salesforce case subject."""
+    """Extract a Site identifier from a Salesforce case subject."""
     subject = clean(subject)
     if not subject:
         return ''
@@ -339,11 +675,13 @@ def extract_site(subject):
     return match.group(0).upper() if match else ''
 
 
-def run_report(report_path, directory_path, output_path=None):
-    """Enrich all report worksheets containing Asset Location, preserving source file."""
+def run_report(report_path, map_path=None, output_path=None):
+    """Enrich report sheets using CoreWeave_Map.json; leave input untouched."""
     report_path = Path(report_path)
-    output_path = Path(output_path) if output_path else report_path.with_name(report_path.stem + '_Standardized.xlsx')
-    registry = SiteRegistry.from_workbook(directory_path)
+    output_path = Path(output_path) if output_path else report_path.with_name(
+        report_path.stem + '_Standardized.xlsx'
+    )
+    registry = SiteRegistry.from_map(map_path)
     sheets = pd.read_excel(report_path, sheet_name=None, dtype={'Case Number': str})
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         for name, frame in sheets.items():
@@ -353,11 +691,14 @@ def run_report(report_path, directory_path, output_path=None):
     return output_path
 
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='Standardize CoreWeave addresses and map sites')
+def main():
+    parser = argparse.ArgumentParser(description='Standardize addresses against CoreWeave_Map.json')
     parser.add_argument('report', help='Input report XLSX')
-    parser.add_argument('directory', help='CoreWeave site directory XLSX')
+    parser.add_argument('--site-map', default=str(DEFAULT_MAP), help='Path to CoreWeave_Map.json')
     parser.add_argument('--output', help='Output XLSX (default: *_Standardized.xlsx)')
     args = parser.parse_args()
-    print(run_report(args.report, args.directory, args.output))
+    print(run_report(args.report, args.site_map, args.output))
+
+
+if __name__ == '__main__':
+    main()
